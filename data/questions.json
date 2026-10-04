@@ -1,0 +1,67 @@
+[
+  {
+    "id": 1,
+    "question": "下列哪一个数是质数？",
+    "options": [
+      { "id": "A", "text": "21" },
+      { "id": "B", "text": "29" },
+      { "id": "C", "text": "39" },
+      { "id": "D", "text": "51" }
+    ],
+    "correctAnswer": "B",
+    "explanation": "29 只能被 1 和它本身整除，因此是质数。21、39 和 51 都可以被 3 整除。",
+    "knowledgePoint": "数学 · 质数与合数"
+  },
+  {
+    "id": 2,
+    "question": "在光合作用中，绿色植物主要吸收哪种气体？",
+    "options": [
+      { "id": "A", "text": "氧气" },
+      { "id": "B", "text": "氮气" },
+      { "id": "C", "text": "二氧化碳" },
+      { "id": "D", "text": "氢气" }
+    ],
+    "correctAnswer": "C",
+    "explanation": "绿色植物通过叶片吸收二氧化碳，在光照下利用水合成有机物，并释放氧气。",
+    "knowledgePoint": "生物 · 光合作用"
+  },
+  {
+    "id": 3,
+    "question": "“海内存知己，天涯若比邻”的作者是谁？",
+    "options": [
+      { "id": "A", "text": "王勃" },
+      { "id": "B", "text": "李白" },
+      { "id": "C", "text": "杜甫" },
+      { "id": "D", "text": "白居易" }
+    ],
+    "correctAnswer": "A",
+    "explanation": "这两句出自初唐诗人王勃的《送杜少府之任蜀州》，表达了真挚友情不受空间阻隔的情感。",
+    "knowledgePoint": "语文 · 古诗词常识"
+  },
+  {
+    "id": 4,
+    "question": "一个三角形的两个内角分别为 45° 和 65°，第三个内角是多少度？",
+    "options": [
+      { "id": "A", "text": "60°" },
+      { "id": "B", "text": "65°" },
+      { "id": "C", "text": "70°" },
+      { "id": "D", "text": "80°" }
+    ],
+    "correctAnswer": "C",
+    "explanation": "三角形三个内角之和为 180°，所以第三个内角为 180° − 45° − 65° = 70°。",
+    "knowledgePoint": "数学 · 三角形内角和"
+  },
+  {
+    "id": 5,
+    "question": "英文单词 “library” 的中文含义是？",
+    "options": [
+      { "id": "A", "text": "实验室" },
+      { "id": "B", "text": "博物馆" },
+      { "id": "C", "text": "体育馆" },
+      { "id": "D", "text": "图书馆" }
+    ],
+    "correctAnswer": "D",
+    "explanation": "library 意为“图书馆”；laboratory 才是“实验室”。",
+    "knowledgePoint": "英语 · 基础词汇"
+  }
+]

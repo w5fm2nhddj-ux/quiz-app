@@ -86,6 +86,14 @@ export async function solveWithDeepSeek(question, options = {}) {
     stream: false,
   }, { signal: options.signal });
 
-  return solverResultSchema.parse(parseJsonContent(completion.choices?.[0]?.message?.content));
-  
+  const parsed = solverResultSchema.parse(parseJsonContent(completion.choices?.[0]?.message?.content));
+  const usage = completion.usage ?? {};
+  return {
+    ...parsed,
+    usage: {
+      promptTokens: Number(usage.prompt_tokens ?? usage.promptTokens ?? 0),
+      completionTokens: Number(usage.completion_tokens ?? usage.completionTokens ?? 0),
+      totalTokens: Number(usage.total_tokens ?? usage.totalTokens ?? 0),
+    },
+  };
 }

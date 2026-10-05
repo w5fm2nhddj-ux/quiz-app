@@ -37,12 +37,20 @@ export function QuizPage() {
   const location = useLocation();
   const [bankVersion, setBankVersion] = useState(0);
   const bank = useMemo(() => questionBankRepository.getById(bankId), [bankId, bankVersion]);
-  const mode = new URLSearchParams(location.search).get("mode");
+  const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  const mode = searchParams.get("mode");
+  const requestedQuestionId = searchParams.get("questionId");
   const wrongQuestions = useMemo(() => getWrongQuestions(bankId), [bankId, bankVersion, location.search]);
   const [wrongSessionQuestionIds, setWrongSessionQuestionIds] = useState<string[]>([]);
+  const isSingleWrongRetry = mode === "wrong" && Boolean(requestedQuestionId);
+
   useEffect(() => {
     if (!bank || mode !== "wrong") {
       setWrongSessionQuestionIds([]);
+      return;
+    }
+
+    if (isSingleWrongRetry) {
       return;
     }
 
@@ -53,15 +61,19 @@ export function QuizPage() {
     setSubmitted(false);
     setScore(0);
     setComplete(false);
-  }, [bank?.id, bankId, mode, location.search]);
+  }, [bank?.id, bankId, mode, isSingleWrongRetry, location.search]);
 
   const drillQuestions = useMemo(() => {
     if (!bank) return [];
     if (mode !== "wrong") return bank.questions;
+    if (isSingleWrongRetry) {
+      const targetQuestion = bank.questions.find((question) => question.id === requestedQuestionId);
+      return targetQuestion ? [targetQuestion] : [];
+    }
     return wrongSessionQuestionIds
       .map((questionId) => bank.questions.find((question) => question.id === questionId))
       .filter((question): question is Question => Boolean(question));
-  }, [bank, mode, wrongSessionQuestionIds]);
+  }, [bank, isSingleWrongRetry, mode, requestedQuestionId, wrongSessionQuestionIds]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selected, setSelected] = useState<string[]>([]);
   const [submitted, setSubmitted] = useState(false);
@@ -133,6 +145,19 @@ export function QuizPage() {
         <h1>{bank.name}</h1>
         <p>这个题库暂时没有题目，请先上传题库文件。</p>
         <Link className="primary-button" to="/">返回我的题库</Link>
+      </main>
+    );
+  }
+
+  if (mode === "wrong" && isSingleWrongRetry && requestedQuestionId && drillQuestions.length === 0) {
+    return (
+      <main className="page-shell centered-state">
+        <h1>{bank.name}</h1>
+        <p>这道题已经不存在或已被删除，无法继续重做。</p>
+        <div className="complete-actions">
+          <Link className="primary-button" to={`/banks/${bankId}/wrong`}>返回错题本</Link>
+          <Link className="secondary-button" to={`/banks/${bankId}/practice?mode=wrong`}>继续错题专项</Link>
+        </div>
       </main>
     );
   }
@@ -228,6 +253,7 @@ export function QuizPage() {
   }
 
   if (complete) {
+    const isSingleQuestionRound = isSingleWrongRetry;
     return (
       <main className="page-shell centered-state complete-state">
         <div className="completion-badge">✓</div>
@@ -236,14 +262,21 @@ export function QuizPage() {
         <p>本次答对 <strong>{score}</strong> / {drillQuestions.length} 题</p>
         <div className="score-bar"><span style={{ width: `${(score / Math.max(drillQuestions.length, 1)) * 100}%` }} /></div>
         <div className="complete-actions">
-          <button className="primary-button" onClick={() => {
-            setCurrentIndex(0);
-            setSelected([]);
-            setSubmitted(false);
-            setScore(0);
-            setComplete(false);
-          }}>再练一次</button>
-          <Link className="secondary-button" to="/">返回题库</Link>
+          {isSingleQuestionRound ? (
+            <>
+              <Link className="primary-button" to={`/banks/${bankId}/wrong`}>返回错题本</Link>
+              <Link className="secondary-button" to={`/banks/${bankId}/practice?mode=wrong`}>继续错题专项</Link>
+            </>
+          ) : (
+            <button className="primary-button" onClick={() => {
+              setCurrentIndex(0);
+              setSelected([]);
+              setSubmitted(false);
+              setScore(0);
+              setComplete(false);
+            }}>再练一次</button>
+          )}
+          {!isSingleQuestionRound && <Link className="secondary-button" to="/">返回题库</Link>}
         </div>
       </main>
     );

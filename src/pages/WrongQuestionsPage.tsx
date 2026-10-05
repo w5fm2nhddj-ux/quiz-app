@@ -81,7 +81,7 @@ export function WrongQuestionsPage() {
               <p style={{ margin: "0 0 18px", color: "#5f5b69" }}><strong>正确答案：</strong> {question.correctAnswer.length > 0 ? question.correctAnswer.join("、") : "暂无答案"}</p>
               <div className="wrong-actions" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px" }}>
                 <span style={{ color: "#9b98a5", fontSize: "12px" }}>最近复习：{new Date(question.lastAttemptedAt).toLocaleString("zh-CN")}</span>
-                <Link className="primary-button" to={`/banks/${bankId}/practice?mode=wrong`}>重做这题</Link>
+                <Link className="primary-button" to={`/banks/${bankId}/practice?mode=wrong&questionId=${encodeURIComponent(question.questionId)}`}>重做这题</Link>
               </div>
             </article>
           ))}

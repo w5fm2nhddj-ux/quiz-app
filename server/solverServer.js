@@ -5,6 +5,15 @@ import { solveMissingQuestions } from "../agents/solveMissingQuestions.js";
 import { configureProxyFromEnv } from "./proxyConfig.js";
 import { classifyDeepSeekHealthResponse } from "./deepSeekHealth.js";
 import { createDeepSeekEnvironmentLoader } from "./envConfig.js";
+import {
+  authorizeAiRequest,
+  createAdminSession,
+  estimateAiQuote,
+  getAiWallet,
+  getAIBillingState,
+  rechargeAiWallet,
+  settleAiUsage,
+} from "./aiBilling.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const refreshDeepSeekEnvironment = createDeepSeekEnvironmentLoader(projectRoot);
@@ -135,6 +144,59 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && request.url === "/api/ai/admin-unlock") {
+    try {
+      const body = await readJson(request);
+      const result = createAdminSession(body.password);
+      if (!result.ok) {
+        sendJson(response, 401, result, origin);
+        return;
+      }
+      sendJson(response, 200, result, origin);
+      return;
+    } catch (error) {
+      sendJson(response, 400, { ok: false, code: "INVALID_REQUEST", error: "管理员解锁请求无效" }, origin);
+      return;
+    }
+  }
+
+  if (request.method === "POST" && request.url === "/api/ai/quote") {
+    try {
+      const body = await readJson(request);
+      const quote = estimateAiQuote({
+        questionCount: Array.isArray(body.questions) ? body.questions.length : Number(body.questionCount) || 1,
+      });
+      sendJson(response, 200, quote, origin);
+      return;
+    } catch (error) {
+      sendJson(response, 400, { ok: false, code: "INVALID_REQUEST", error: "报价请求无效" }, origin);
+      return;
+    }
+  }
+
+  if (request.method === "POST" && request.url === "/api/ai/wallet/recharge") {
+    try {
+      const body = await readJson(request);
+      const walletResult = rechargeAiWallet(body.userId || "demo-user", body.amountFen || 500, "mock");
+      sendJson(response, walletResult.ok ? 200 : 400, walletResult, origin);
+      return;
+    } catch (error) {
+      sendJson(response, 400, { ok: false, code: "INVALID_REQUEST", error: "充值请求无效" }, origin);
+      return;
+    }
+  }
+
+  if (request.method === "GET" && request.url === "/api/ai/wallet") {
+    const userId = new URL(request.url, `http://${request.headers.host || "localhost"}`).searchParams.get("userId") || "demo-user";
+    sendJson(response, 200, { wallet: getAiWallet(userId), pricing: getAIBillingState().pricing }, origin);
+    return;
+  }
+
+  if (request.method === "GET" && request.url === "/api/ai/transactions") {
+    sendJson(response, 200, getAIBillingState(), origin);
+    return;
+  }
+
   if (request.method !== "POST" || request.url !== "/api/solve-missing") {
     sendJson(response, 404, { error: "Not found" }, origin);
     return;
@@ -166,6 +228,28 @@ const server = createServer(async (request, response) => {
       }, origin);
       return;
     }
+
+    const quote = estimateAiQuote({ questionCount: body.questions.length });
+    const authToken = String(request.headers["x-ai-session"] || request.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    const authorized = authorizeAiRequest({
+      userId: body.userId || "demo-user",
+      authToken,
+      requestId: body.requestId || `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      questionCount: body.questions.length,
+      estimatedChargeFen: body.estimatedChargeFen ?? quote.estimatedUserChargeFen,
+      adminMode: Boolean(body.adminMode),
+    });
+    if (!authorized.allowed) {
+      sendJson(response, 402, {
+        code: "INSUFFICIENT_BALANCE",
+        error: "AI 余额不足",
+        wallet: getAiWallet(body.userId || "demo-user"),
+        requiredFen: authorized.requiredFen,
+        balanceFen: authorized.balanceFen,
+      }, origin);
+      return;
+    }
+
     const result = await solveMissingQuestions(body.questions, {
       batchSize: 10,
       concurrency: 3,
@@ -173,7 +257,18 @@ const server = createServer(async (request, response) => {
       timeoutMs: 30_000,
     });
     for (const error of result.errors) logDiagnostic("question", error);
-    sendJson(response, 200, result, origin);
+
+    const usage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    const actualCost = settleAiUsage({
+      userId: body.userId || "demo-user",
+      requestId: authorized.requestId,
+      questionCount: body.questions.length,
+      inputTokens: usage.promptTokens,
+      outputTokens: usage.completionTokens,
+      totalTokens: usage.totalTokens,
+      adminMode: Boolean(authorized.adminMode),
+    });
+    sendJson(response, 200, { ...result, billing: actualCost }, origin);
   } catch (error) {
     const tooLarge = error instanceof Error && error.message === "REQUEST_TOO_LARGE";
     if (!tooLarge) {

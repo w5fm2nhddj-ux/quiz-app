@@ -242,20 +242,18 @@ export async function solveQuestionWithDeepSeek(question, options = {}) {
         question,
         solverResultSchema.parse(await solveModel(question, controller.signal)),
       );
-      if (solved.answer === null) {
-        return {
-          ...question,
-          answer: null,
-          explanation: solved.explanation,
-          knowledgePoints: solved.knowledgePoints,
-          optionExplanations: solved.optionExplanations,
-          relatedQuestions: solved.relatedQuestions,
-          answerSource: "missing",
-          confidence: solved.confidence,
-          needsReview: true,
-        };
-      }
-      return {
+      const usage = solved.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+      const normalizedResult = solved.answer === null ? {
+        ...question,
+        answer: null,
+        explanation: solved.explanation,
+        knowledgePoints: solved.knowledgePoints,
+        optionExplanations: solved.optionExplanations,
+        relatedQuestions: solved.relatedQuestions,
+        answerSource: "missing",
+        confidence: solved.confidence,
+        needsReview: true,
+      } : {
         ...question,
         answer: solved.answer,
         explanation: solved.explanation,
@@ -265,6 +263,14 @@ export async function solveQuestionWithDeepSeek(question, options = {}) {
         answerSource: "ai",
         confidence: solved.confidence,
         needsReview: solved.needsReview || solved.confidence < 0.8,
+      };
+      return {
+        ...normalizedResult,
+        usage: {
+          promptTokens: Number(usage.promptTokens ?? usage.prompt_tokens ?? 0),
+          completionTokens: Number(usage.completionTokens ?? usage.completion_tokens ?? 0),
+          totalTokens: Number(usage.totalTokens ?? usage.total_tokens ?? 0),
+        },
       };
     } catch (error) {
       lastError = classifySolverError(error, didTimeout);
@@ -289,6 +295,7 @@ export async function solveMissingQuestions(questions, options = {}) {
   let aiFailures = 0;
   let attempted = 0;
   let halted = null;
+  const usageTotals = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
   for (let start = 0; start < candidateIndexes.length; start += batchSize) {
     const batch = candidateIndexes.slice(start, start + batchSize);
@@ -302,6 +309,10 @@ export async function solveMissingQuestions(questions, options = {}) {
           if (!hasAnswer(output[index].answer)) {
             attempted += 1;
             output[index] = await solveOne(output[index]);
+            const usage = output[index].usage ?? {};
+            usageTotals.promptTokens += Number(usage.promptTokens ?? usage.prompt_tokens ?? 0);
+            usageTotals.completionTokens += Number(usage.completionTokens ?? usage.completion_tokens ?? 0);
+            usageTotals.totalTokens += Number(usage.totalTokens ?? usage.total_tokens ?? 0);
           }
           if (!hasAnswer(output[index].answer)) {
             aiFailures += 1;
@@ -337,6 +348,11 @@ export async function solveMissingQuestions(questions, options = {}) {
     questions: output,
     errors,
     halted,
+    usage: {
+      promptTokens: usageTotals.promptTokens,
+      completionTokens: usageTotals.completionTokens,
+      totalTokens: usageTotals.totalTokens,
+    },
     stats: {
       total: output.length,
       attempted,

@@ -79,7 +79,8 @@ export async function completeMissingQuestionAnswer(
     return { bank: currentBank, question: currentQuestion, aiRequested: false, saved: false };
   }
 
-  if (!isAiCompletionEnabled()) {
+  const explicitSolve = dependencies.solve ?? null;
+  if (!isAiCompletionEnabled() && !explicitSolve) {
     return { bank: currentBank, question: currentQuestion, aiRequested: false, saved: false };
   }
 

@@ -51,6 +51,20 @@ export function buildWrongSessionQuestionIds(
     .map((question) => question.id);
 }
 
+export function resolveWrongPracticeQuestions(
+  bankQuestions: Pick<Question, "id">[],
+  wrongQuestionRecords: Pick<WrongQuestionRecord, "questionId">[],
+  requestedQuestionId?: string | null,
+): string[] {
+  if (requestedQuestionId) {
+    return bankQuestions.some((question) => question.id === requestedQuestionId)
+      ? [requestedQuestionId]
+      : [];
+  }
+
+  return buildWrongSessionQuestionIds(bankQuestions, wrongQuestionRecords);
+}
+
 export function recordWrongQuestion(
   bankId: string,
   question: Pick<Question, "id" | "question" | "type" | "answer" | "source">,

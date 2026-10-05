@@ -93,7 +93,7 @@ export class SolverClientError extends Error {
   }
 }
 
-const DEFAULT_AI_COMPLETION_DISABLED = false;
+const DEFAULT_AI_COMPLETION_DISABLED = true;
 let aiCompletionEnabled = !DEFAULT_AI_COMPLETION_DISABLED;
 
 export function isAiCompletionEnabled() {
@@ -290,10 +290,21 @@ async function requestBatch(
   const timeout = setTimeout(() => controller.abort(new Error("MODEL_TIMEOUT")), 2 * 60_000);
 
   try {
+    const storedSession = typeof window !== "undefined" ? localStorage.getItem("ai-session") : null;
+    const userId = typeof window !== "undefined" ? localStorage.getItem("ai-user-id") ?? "demo-user" : "demo-user";
     const response = await fetchImpl(solverApiUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ questions }),
+      headers: {
+        "Content-Type": "application/json",
+        ...(storedSession ? { Authorization: `Bearer ${storedSession}` } : {}),
+        "x-user-id": userId,
+      },
+      body: JSON.stringify({
+        questions,
+        userId,
+        requestId: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        estimatedChargeFen: Math.max(30, questions.length * 30),
+      }),
       signal: controller.signal,
     });
     const payload = await readJson<SolverResponse & ErrorPayload>(response);

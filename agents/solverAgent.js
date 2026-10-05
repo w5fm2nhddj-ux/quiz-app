@@ -38,7 +38,39 @@ export const solverSystemPrompt = `你是一个大学刷题学习助手。
 
 单选题 answer 返回字符串，例如 "B"；多选题返回数组，例如 ["A", "C"]；判断题返回布尔值；填空题返回标准答案文本；简答题返回参考答案。
 选择题只能使用输入中存在的选项编号。confidence 必须在 0 到 1 之间，低于 0.8 时 needsReview 必须为 true。
-输出必须是严格 JSON，不要输出 Markdown。JSON 字段必须包含 answer、explanation、knowledgePoints、optionExplanations、relatedQuestions、confidence、needsReview。`;
+输出必须是严格 JSON，不要输出 Markdown。
+
+JSON 字段必须包含：
+answer、
+explanation、
+knowledgePoints、
+optionExplanations、
+relatedQuestions、
+confidence、
+needsReview。
+
+如果是选择题：
+optionExplanations 必须是数组，每一项严格使用以下格式：
+
+{
+  "optionId": "A",
+  "explanation": "解释为什么正确或错误"
+}
+
+其中：
+- optionId 必须对应输入中的选项编号；
+- 不允许使用 id 字段；
+- 不允许添加 isCorrect 字段；
+- 不要返回其他额外字段。
+
+如果没有选项解释，返回空数组 []。
+
+relatedQuestions 如果生成，也必须包含：
+question、
+answer、
+explanation。
+
+不要添加 type、options 等额外字段。`
 
 export async function solveWithDeepSeek(question, options = {}) {
   const client = options.client ?? getDeepSeekClient();

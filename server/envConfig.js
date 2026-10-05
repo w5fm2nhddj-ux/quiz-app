@@ -10,13 +10,16 @@ export function createDeepSeekEnvironmentLoader(projectRoot, options = {}) {
     { label: "quiz-app/.env", path: resolve(projectRoot, ".env") },
     { label: "../.env", path: resolve(dirname(projectRoot), ".env") },
   ];
-  const inheritedKey = String(targetEnv.DEEPSEEK_API_KEY ?? "").trim();
-  let loadedFromFile = false;
+  const managedKeys = ["DEEPSEEK_API_KEY", "AI_ADMIN_PASSWORD"];
+  const inheritedValues = Object.fromEntries(
+    managedKeys.map((key) => [key, String(targetEnv[key] ?? "").trim()]),
+  );
+  const loadedFromFile = Object.fromEntries(managedKeys.map((key) => [key, false]));
 
   return function refreshDeepSeekEnvironment() {
     const attempts = [];
-    let selected = null;
-    let selectedKey = "";
+    const selectedValues = Object.fromEntries(managedKeys.map((key) => [key, ""]));
+    const selectedSources = Object.fromEntries(managedKeys.map((key) => [key, null]));
 
     for (const candidate of candidates) {
       const isolatedEnv = {};
@@ -24,37 +27,47 @@ export function createDeepSeekEnvironmentLoader(projectRoot, options = {}) {
       const result = exists
         ? loadDotenv({ path: candidate.path, quiet: true, processEnv: isolatedEnv })
         : { parsed: undefined };
-      const value = String(isolatedEnv.DEEPSEEK_API_KEY ?? "").trim();
+      const values = Object.fromEntries(
+        managedKeys.map((key) => [key, String(isolatedEnv[key] ?? "").trim()]),
+      );
       attempts.push({
         file: candidate.label,
         exists,
         loaded: exists && !result.error,
-        hasKey: Boolean(value),
+        hasKey: Boolean(values.DEEPSEEK_API_KEY),
+        hasAdminPassword: Boolean(values.AI_ADMIN_PASSWORD),
       });
-      if (!selected && value) {
-        selected = candidate.label;
-        selectedKey = value;
+      for (const key of managedKeys) {
+        if (!selectedValues[key] && values[key]) {
+          selectedValues[key] = values[key];
+          selectedSources[key] = candidate.label;
+        }
       }
     }
 
-    if (selectedKey) {
-      targetEnv.DEEPSEEK_API_KEY = selectedKey;
-      loadedFromFile = true;
-    } else if (inheritedKey) {
-      targetEnv.DEEPSEEK_API_KEY = inheritedKey;
-      loadedFromFile = false;
-      selected = "process environment";
-    } else if (loadedFromFile) {
-      delete targetEnv.DEEPSEEK_API_KEY;
-      loadedFromFile = false;
+    for (const key of managedKeys) {
+      if (selectedValues[key]) {
+        targetEnv[key] = selectedValues[key];
+        loadedFromFile[key] = true;
+      } else if (inheritedValues[key]) {
+        targetEnv[key] = inheritedValues[key];
+        loadedFromFile[key] = false;
+        selectedSources[key] = "process environment";
+      } else if (loadedFromFile[key]) {
+        delete targetEnv[key];
+        loadedFromFile[key] = false;
+      }
     }
 
     const activeKey = String(targetEnv.DEEPSEEK_API_KEY ?? "").trim();
+    const activeAdminPassword = String(targetEnv.AI_ADMIN_PASSWORD ?? "").trim();
     return {
       loaded: attempts.some((attempt) => attempt.loaded),
-      source: selected,
+      source: selectedSources.DEEPSEEK_API_KEY,
       keyExists: Boolean(activeKey),
       keyLength: activeKey.length,
+      adminPasswordConfigured: Boolean(activeAdminPassword),
+      adminPasswordSource: selectedSources.AI_ADMIN_PASSWORD,
       attempts,
     };
   };

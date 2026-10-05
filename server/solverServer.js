@@ -132,6 +132,7 @@ const server = createServer(async (request, response) => {
     sendJson(response, 200, {
       ok: true,
       apiKeyConfigured: Boolean(process.env.DEEPSEEK_API_KEY),
+      adminPasswordConfigured: Boolean(process.env.AI_ADMIN_PASSWORD),
       provider: "deepseek",
       model: "deepseek-flash",
       environment: environmentStatus,
@@ -155,6 +156,7 @@ const server = createServer(async (request, response) => {
 
   if (request.method === "POST" && request.url === "/api/ai/admin-unlock") {
     try {
+      environmentStatus = refreshDeepSeekEnvironment();
       const body = await readJson(request);
       const result = createAdminSession(body.password);
       if (!result.ok) {

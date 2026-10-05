@@ -1,3 +1,5 @@
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+
 const DEFAULT_PRICING = {
   inputPricePer1M: Number(process.env.AI_INPUT_PRICE_PER_1M ?? 1.1),
   outputPricePer1M: Number(process.env.AI_OUTPUT_PRICE_PER_1M ?? 2.2),
@@ -7,14 +9,21 @@ const DEFAULT_PRICING = {
 };
 
 const state = {
-  wallets: new Map([
-    ["demo-user", { userId: "demo-user", balanceFen: 10000, updatedAt: new Date().toISOString() }],
-  ]),
+  wallets: new Map(),
+  userSessions: new Map(),
   adminSessions: new Map(),
   transactions: [],
   requestIndex: new Map(),
   paymentOrders: [],
 };
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function randomToken(prefix, bytes = 24) {
+  return prefix + "_" + randomBytes(bytes).toString("hex");
+}
 
 function normalizeFen(value) {
   const numeric = Number(value ?? 0);
@@ -27,6 +36,12 @@ function normalizePrice(value, fallback) {
   return Number.isFinite(numeric) && numeric >= 0 ? numeric : fallback;
 }
 
+function secureEqual(left, right) {
+  const leftHash = createHash("sha256").update(String(left)).digest();
+  const rightHash = createHash("sha256").update(String(right)).digest();
+  return timingSafeEqual(leftHash, rightHash);
+}
+
 export function getAiPricingConfig() {
   return {
     inputPricePer1M: normalizePrice(process.env.AI_INPUT_PRICE_PER_1M, DEFAULT_PRICING.inputPricePer1M),
@@ -37,41 +52,88 @@ export function getAiPricingConfig() {
   };
 }
 
-export function ensureAiWallet(userId = "demo-user") {
-  const safeUserId = String(userId || "demo-user").trim() || "demo-user";
+export function ensureAiWallet(userId) {
+  const safeUserId = String(userId || "").trim();
+  if (!safeUserId) throw new Error("AI_USER_ID_REQUIRED");
   const current = state.wallets.get(safeUserId);
   if (current) return current;
-  const wallet = { userId: safeUserId, balanceFen: 0, updatedAt: new Date().toISOString() };
+  const wallet = { userId: safeUserId, balanceFen: 0, updatedAt: nowIso() };
   state.wallets.set(safeUserId, wallet);
   return wallet;
 }
 
-export function getAiWallet(userId = "demo-user") {
+export function getAiWallet(userId) {
   return ensureAiWallet(userId);
 }
 
-export function createPaymentOrder(userId, amountFen, provider = "mock") {
+export function createUserSession() {
+  const token = randomToken("usr");
+  const userId = randomToken("wallet", 12);
+  const session = {
+    token,
+    userId,
+    createdAt: nowIso(),
+    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString(),
+  };
+  state.userSessions.set(token, session);
+  ensureAiWallet(userId);
+  return { token, userId, expiresAt: session.expiresAt };
+}
+
+export function validateUserSession(token) {
+  if (!token) return null;
+  const session = state.userSessions.get(String(token));
+  if (!session) return null;
+  if (new Date(session.expiresAt).getTime() <= Date.now()) {
+    state.userSessions.delete(String(token));
+    return null;
+  }
+  return session;
+}
+
+export function createPendingPaymentOrder(userId, amountFen, provider = "unconfigured") {
+  const safeAmount = normalizeFen(amountFen);
+  if (safeAmount <= 0) throw new Error("INVALID_AMOUNT");
   const order = {
-    id: `pay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    userId: String(userId || "demo-user"),
-    amountFen: normalizeFen(amountFen),
+    id: randomToken("pay", 10),
+    userId: String(userId),
+    amountFen: safeAmount,
     provider,
-    providerOrderId: `mock-${Date.now()}`,
-    status: "paid",
-    createdAt: new Date().toISOString(),
-    paidAt: new Date().toISOString(),
+    providerOrderId: null,
+    paymentUrl: null,
+    status: "pending",
+    createdAt: nowIso(),
+    paidAt: null,
   };
   state.paymentOrders.push(order);
   return order;
 }
 
-export function rechargeAiWallet(userId, amountFen, provider = "mock") {
+export function applyVerifiedPayment({
+  userId,
+  amountFen,
+  provider = "verified",
+  providerOrderId = null,
+} = {}) {
   const safeAmount = normalizeFen(amountFen);
-  if (safeAmount <= 0) return { ok: false, code: "INVALID_AMOUNT", message: "充值金额必须为正整数分" };
+  if (!userId || safeAmount <= 0) {
+    return { ok: false, code: "INVALID_PAYMENT", message: "支付确认数据无效" };
+  }
   const wallet = ensureAiWallet(userId);
-  const order = createPaymentOrder(userId, safeAmount, provider);
+  const order = {
+    id: randomToken("pay", 10),
+    userId: String(userId),
+    amountFen: safeAmount,
+    provider,
+    providerOrderId,
+    paymentUrl: null,
+    status: "paid",
+    createdAt: nowIso(),
+    paidAt: nowIso(),
+  };
   wallet.balanceFen += safeAmount;
-  wallet.updatedAt = new Date().toISOString();
+  wallet.updatedAt = nowIso();
+  state.paymentOrders.push(order);
   return { ok: true, wallet, order };
 }
 
@@ -106,6 +168,9 @@ export function calculateActualAiCost(inputTokens, outputTokens) {
   const config = getAiPricingConfig();
   const safeInput = Math.max(0, Number(inputTokens) || 0);
   const safeOutput = Math.max(0, Number(outputTokens) || 0);
+  if (safeInput + safeOutput <= 0) {
+    return { inputTokens: 0, outputTokens: 0, totalTokens: 0, providerCostFen: 0, platformFeeFen: 0, chargedFen: 0 };
+  }
   const providerCostFen = Math.round(
     ((safeInput * config.inputPricePer1M) + (safeOutput * config.outputPricePer1M)) / 1_000_000 * 100,
   );
@@ -113,34 +178,33 @@ export function calculateActualAiCost(inputTokens, outputTokens) {
     config.minChargeFen,
     Math.round(providerCostFen * config.markupMultiplier + config.fixedServiceFeeFen),
   );
-  const platformFeeFen = Math.max(0, chargedFen - providerCostFen);
-
   return {
     inputTokens: Math.round(safeInput),
     outputTokens: Math.round(safeOutput),
     totalTokens: Math.round(safeInput + safeOutput),
     providerCostFen,
-    platformFeeFen,
+    platformFeeFen: Math.max(0, chargedFen - providerCostFen),
     chargedFen,
   };
 }
 
 export function createAdminSession(password) {
-  const expectedPassword = String(process.env.AI_ADMIN_PASSWORD ?? "admin-demo-password").trim();
-  if (!password || String(password).trim() !== expectedPassword) {
-    return { ok: false, code: "INVALID_ADMIN_PASSWORD", message: "管理员密码错误" };
+  const expectedPassword = String(process.env.AI_ADMIN_PASSWORD ?? "").trim();
+  if (!expectedPassword) {
+    return { ok: false, code: "ADMIN_PASSWORD_NOT_CONFIGURED", message: "服务器尚未配置 AI_ADMIN_PASSWORD" };
   }
-
-  const token = `admin_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-  state.adminSessions.set(token, {
+  if (!password || !secureEqual(String(password).trim(), expectedPassword)) {
+    return { ok: false, code: "INVALID_ADMIN_PASSWORD", message: "管理员密钥错误" };
+  }
+  const token = randomToken("admin");
+  const session = {
     token,
-    userId: "admin",
     adminMode: true,
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso(),
     expiresAt: new Date(Date.now() + 1000 * 60 * 30).toISOString(),
-  });
-
-  return { ok: true, token, adminMode: true, expiresAt: state.adminSessions.get(token).expiresAt };
+  };
+  state.adminSessions.set(token, session);
+  return { ok: true, token, adminMode: true, expiresAt: session.expiresAt };
 }
 
 export function validateAdminSession(token) {
@@ -157,124 +221,114 @@ export function validateAdminSession(token) {
 export function getAIBillingState() {
   return {
     wallets: [...state.wallets.values()],
-    adminSessions: [...state.adminSessions.values()],
     transactions: [...state.transactions],
     paymentOrders: [...state.paymentOrders],
     pricing: getAiPricingConfig(),
   };
 }
 
-export function authorizeAiRequest({
-  userId = "demo-user",
-  authToken,
-  requestId,
-  questionCount = 1,
-  estimatedChargeFen,
-  adminMode = false,
-} = {}) {
-  const safeRequestId = String(requestId || `ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-  if (state.requestIndex.has(safeRequestId)) {
-    return {
-      allowed: true,
-      idempotent: true,
-      requestId: safeRequestId,
-      transaction: state.requestIndex.get(safeRequestId),
-    };
+export function authorizeAiRequest({ userId, authToken, requestId, questionCount = 1 } = {}) {
+  const safeRequestId = String(requestId || randomToken("req", 10));
+  const existing = state.requestIndex.get(safeRequestId);
+  if (existing) {
+    return { allowed: true, idempotent: true, requestId: safeRequestId, adminMode: Boolean(existing.adminMode), transaction: existing };
   }
 
-  const validAdmin = Boolean(adminMode) || validateAdminSession(authToken);
-  if (validAdmin) {
+  if (validateAdminSession(authToken)) {
     const transaction = {
-      id: `tx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      userId: userId || "admin",
+      id: randomToken("tx", 10),
+      userId: "admin",
       requestId: safeRequestId,
       questionCount: Math.max(0, Number(questionCount) || 0),
+      reservedFen: 0,
       chargedFen: 0,
       providerCostFen: 0,
       platformFeeFen: 0,
       status: "authorized",
       adminMode: true,
-      createdAt: new Date().toISOString(),
+      createdAt: nowIso(),
     };
     state.requestIndex.set(safeRequestId, transaction);
     return { allowed: true, idempotent: false, requestId: safeRequestId, adminMode: true, transaction };
   }
 
   const wallet = ensureAiWallet(userId);
-  const quote = estimateAiQuote({ questionCount, estimatedInputTokens: questionCount * 2500, estimatedOutputTokens: questionCount * 1500 });
-  const requiredFen = normalizeFen(estimatedChargeFen ?? quote.estimatedUserChargeFen);
+  const quote = estimateAiQuote({ questionCount });
+  const requiredFen = quote.estimatedUserChargeFen;
   if (wallet.balanceFen < requiredFen) {
-    return {
-      allowed: false,
-      code: "INSUFFICIENT_BALANCE",
-      balanceFen: wallet.balanceFen,
-      requiredFen,
-      estimate: quote,
-      requestId: safeRequestId,
-    };
+    return { allowed: false, code: "INSUFFICIENT_BALANCE", balanceFen: wallet.balanceFen, requiredFen, estimate: quote, requestId: safeRequestId };
   }
 
+  wallet.balanceFen -= requiredFen;
+  wallet.updatedAt = nowIso();
   const transaction = {
-    id: `tx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    userId: String(userId || "demo-user"),
+    id: randomToken("tx", 10),
+    userId: String(userId),
     requestId: safeRequestId,
     questionCount: Math.max(0, Number(questionCount) || 0),
-    chargedFen: requiredFen,
+    reservedFen: requiredFen,
+    chargedFen: 0,
     providerCostFen: quote.estimatedProviderCostFen,
-    platformFeeFen: quote.estimatedPlatformFeeFen,
-    status: "authorized",
+    platformFeeFen: 0,
+    status: "reserved",
     adminMode: false,
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso(),
   };
   state.requestIndex.set(safeRequestId, transaction);
   return { allowed: true, idempotent: false, requestId: safeRequestId, adminMode: false, transaction, estimate: quote };
 }
 
-export function settleAiUsage({
-  userId = "demo-user",
-  requestId,
-  questionCount = 0,
-  inputTokens = 0,
-  outputTokens = 0,
-  totalTokens = 0,
-  providerCostFen,
-  platformFeeFen,
-  chargedFen,
-  adminMode = false,
-}) {
-  const safeRequestId = String(requestId || `ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+export function releaseAiReservation(requestId) {
+  const existing = state.requestIndex.get(String(requestId || ""));
+  if (!existing || existing.adminMode || existing.status !== "reserved") return false;
+  const wallet = ensureAiWallet(existing.userId);
+  wallet.balanceFen += normalizeFen(existing.reservedFen);
+  wallet.updatedAt = nowIso();
+  existing.status = "released";
+  existing.releasedAt = nowIso();
+  return true;
+}
+
+export function settleAiUsage({ userId, requestId, questionCount = 0, inputTokens = 0, outputTokens = 0, totalTokens = 0 } = {}) {
+  const safeRequestId = String(requestId || randomToken("req", 10));
   const existing = state.requestIndex.get(safeRequestId);
-  if (existing && existing.status === "settled") {
-    return { ...existing, duplicate: true };
+  if (existing && existing.status === "settled") return { ...existing, duplicate: true };
+
+  const adminMode = Boolean(existing?.adminMode);
+  const cost = calculateActualAiCost(inputTokens, outputTokens);
+  let finalChargeFen = adminMode ? 0 : cost.chargedFen;
+  const reservedFen = adminMode ? 0 : normalizeFen(existing?.reservedFen);
+
+  if (!adminMode) {
+    const wallet = ensureAiWallet(userId || existing?.userId);
+    if (finalChargeFen < reservedFen) {
+      wallet.balanceFen += reservedFen - finalChargeFen;
+    } else if (finalChargeFen > reservedFen) {
+      const extraNeeded = finalChargeFen - reservedFen;
+      const extraCharged = Math.min(extraNeeded, wallet.balanceFen);
+      wallet.balanceFen -= extraCharged;
+      finalChargeFen = reservedFen + extraCharged;
+    }
+    wallet.updatedAt = nowIso();
   }
 
-  const cost = calculateActualAiCost(inputTokens, outputTokens);
-  const finalProviderCostFen = normalizeFen(providerCostFen ?? cost.providerCostFen);
-  const finalPlatformFeeFen = normalizeFen(platformFeeFen ?? cost.platformFeeFen);
-  const finalChargeFen = normalizeFen(chargedFen ?? cost.chargedFen);
   const settled = {
-    id: existing?.id ?? `tx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    userId: String(userId || "demo-user"),
+    id: existing?.id ?? randomToken("tx", 10),
+    userId: adminMode ? "admin" : String(userId || existing?.userId),
     requestId: safeRequestId,
     questionCount: Math.max(0, Number(questionCount) || 0),
     inputTokens: Math.max(0, Number(inputTokens) || 0),
     outputTokens: Math.max(0, Number(outputTokens) || 0),
     totalTokens: Math.max(0, Number(totalTokens) || 0),
-    providerCostFen: finalProviderCostFen,
-    platformFeeFen: finalPlatformFeeFen,
-    chargedFen: adminMode ? 0 : finalChargeFen,
+    reservedFen,
+    providerCostFen: cost.providerCostFen,
+    platformFeeFen: Math.max(0, finalChargeFen - cost.providerCostFen),
+    chargedFen: finalChargeFen,
     status: "settled",
-    adminMode: Boolean(adminMode),
-    createdAt: existing?.createdAt ?? new Date().toISOString(),
-    settledAt: new Date().toISOString(),
+    adminMode,
+    createdAt: existing?.createdAt ?? nowIso(),
+    settledAt: nowIso(),
   };
-
-  if (!adminMode) {
-    const wallet = ensureAiWallet(userId);
-    wallet.balanceFen = Math.max(0, wallet.balanceFen - settled.chargedFen);
-    wallet.updatedAt = new Date().toISOString();
-  }
-
   state.requestIndex.set(safeRequestId, settled);
   state.transactions.push(settled);
   return settled;

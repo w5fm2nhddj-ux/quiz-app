@@ -18,7 +18,8 @@
     "test:deepseek": "node tests/deepseekClient.test.js",
     "test:proxy": "node tests/proxyConfig.test.js",
     "test:env": "node tests/envConfig.test.js",
-    "diagnose:env": "node scripts/check-env.js"
+    "diagnose:env": "node scripts/check-env.js",
+    "test:billing": "node tests/aiBilling.test.js"
   },
   "dependencies": {
     "dotenv": "^18.0.4",

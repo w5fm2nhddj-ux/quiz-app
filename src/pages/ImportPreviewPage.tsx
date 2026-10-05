@@ -10,7 +10,6 @@ import {
 import { importPreviewStore } from "@/importers/previewStore";
 import {
   hasMissingAnswer,
-  isAiCompletionEnabled,
   solveMissingAnswers,
   SolverClientError,
   type SolverProgress,
@@ -24,6 +23,12 @@ import {
   createAiRunLock,
   type AiCompletionMode,
 } from "@/lib/aiCompletionControl";
+import {
+  createAiCheckout,
+  fetchAiAccess,
+  unlockAiAdmin,
+  type AiAccessSnapshot,
+} from "@/lib/aiBillingClient";
 import { questionBankRepository } from "@/lib/questionBankRepository";
 import type { Question, QuestionType } from "@/types/quiz";
 
@@ -211,6 +216,13 @@ export function ImportPreviewPage() {
   const [questionErrors, setQuestionErrors] = useState<SolverQuestionError[]>([]);
   const [showBatchConfirm, setShowBatchConfirm] = useState(false);
   const [trialSucceeded, setTrialSucceeded] = useState((payload?.result.stats.aiAnswers ?? 0) > 0);
+  const [paywallOpen, setPaywallOpen] = useState(false);
+  const [pendingAiMode, setPendingAiMode] = useState<AiCompletionMode | null>(null);
+  const [billingAccess, setBillingAccess] = useState<AiAccessSnapshot | null>(null);
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [billingError, setBillingError] = useState("");
+  const [checkoutMessage, setCheckoutMessage] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
   const aiRunLock = useRef(createAiRunLock()).current;
 
   if (!result || !payload) {
@@ -320,16 +332,84 @@ export function ImportPreviewPage() {
     }
   }
 
+  async function openPaywall(mode: AiCompletionMode) {
+    if (!result || aiStatus === "running") return;
+    const missing = result.questions.filter(hasMissingAnswer).length;
+    const questionCount = mode === "trial" ? Math.min(AI_TRIAL_SIZE, missing) : missing;
+    setPendingAiMode(mode);
+    setPaywallOpen(true);
+    setBillingLoading(true);
+    setBillingError("");
+    setCheckoutMessage("");
+    try {
+      setBillingAccess(await fetchAiAccess(Math.max(1, questionCount)));
+    } catch (error) {
+      setBillingError(error instanceof Error ? error.message : "无法读取 AI 计费信息。");
+    } finally {
+      setBillingLoading(false);
+    }
+  }
+
   function startTrial() {
     if (aiStatus === "running") return;
     setShowBatchConfirm(false);
-    void performAiCompletion("trial");
+    void openPaywall("trial");
   }
 
   function confirmBatchRun() {
     if (aiStatus === "running") return;
     setShowBatchConfirm(false);
-    void performAiCompletion("batch", true);
+    void openPaywall("batch");
+  }
+
+  async function unlockAdminAccess() {
+    if (!adminPassword.trim()) {
+      setBillingError("请输入管理员密钥。");
+      return;
+    }
+    setBillingLoading(true);
+    setBillingError("");
+    try {
+      await unlockAiAdmin(adminPassword);
+      setAdminPassword("");
+      if (pendingAiMode && result) {
+        const missing = result.questions.filter(hasMissingAnswer).length;
+        const questionCount = pendingAiMode === "trial" ? Math.min(AI_TRIAL_SIZE, missing) : missing;
+        setBillingAccess(await fetchAiAccess(Math.max(1, questionCount)));
+      }
+    } catch (error) {
+      setBillingError(error instanceof Error ? error.message : "管理员解锁失败。");
+    } finally {
+      setBillingLoading(false);
+    }
+  }
+
+  async function beginCheckout(amountFen: number) {
+    setBillingLoading(true);
+    setBillingError("");
+    setCheckoutMessage("");
+    try {
+      const result = await createAiCheckout(amountFen);
+      setCheckoutMessage(result.message);
+    } catch (error) {
+      setBillingError(error instanceof Error ? error.message : "创建支付订单失败。");
+    } finally {
+      setBillingLoading(false);
+    }
+  }
+
+  function confirmPaidAiRun() {
+    if (!pendingAiMode || !billingAccess) return;
+    const canUse = billingAccess.adminMode || billingAccess.wallet.balanceFen >= billingAccess.quote.estimatedUserChargeFen;
+    if (!canUse) {
+      setBillingError("余额不足。请先完成充值，或输入管理员密钥解锁。");
+      return;
+    }
+    const mode = pendingAiMode;
+    setPaywallOpen(false);
+    setBillingError("");
+    setCheckoutMessage("");
+    void performAiCompletion(mode, mode === "batch");
   }
 
   function updateQuestion(index: number, patch: Partial<ImportedQuestion>) {
@@ -404,7 +484,6 @@ export function ImportPreviewPage() {
   const failedCount = result.failedBlocks.length;
   const reviewCount = result.stats.needsReview + failedCount;
   const missingCount = result.questions.filter(hasMissingAnswer).length;
-  const aiOffline = !isAiCompletionEnabled();
   const progressPercent = aiProgress.total > 0 ? Math.round(aiProgress.processed / aiProgress.total * 100) : 0;
 
   return (
@@ -431,17 +510,6 @@ export function ImportPreviewPage() {
       </section>
 
       {missingCount > 0 && (
-        aiOffline ? (
-          <section className="ai-solver-status panel-card status-idle">
-            <div className="ai-solver-main">
-              <strong>离线模式：AI 自动补全已关闭</strong>
-              <p>当前版本不连接 OpenAI / DeepSeek，也不会因为缺少 API Key 导致网站无法启动。请在题目列表中手工填写答案，确认后再导入题库。</p>
-            </div>
-            <div className="ai-solver-actions">
-              <button className="secondary-button" disabled>AI 试跑已停用</button>
-            </div>
-          </section>
-        ) : (
           <section className={`ai-solver-status panel-card status-${aiStatus}`}>
             <div className="ai-solver-main">
               <strong>
@@ -516,9 +584,80 @@ export function ImportPreviewPage() {
               {aiError?.blocking && <small className="ai-batch-hint">请先处理上方账户或权限问题，然后刷新页面重新检查。</small>}
             </div>
           </section>
-        )
       )}
 
+      {paywallOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-card ai-paywall-card" role="dialog" aria-modal="true" aria-label="AI 解题计费">
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">AI 解题计费</span>
+                <h2>{billingAccess?.adminMode ? "管理员已解锁" : "确认本次 AI 费用"}</h2>
+              </div>
+              <button className="close-button" type="button" onClick={() => setPaywallOpen(false)}>×</button>
+            </div>
+
+            {billingLoading && <p className="billing-loading">正在读取余额与 Token 预估…</p>}
+
+            {billingAccess && !billingLoading && (
+              <>
+                <div className="billing-summary-grid">
+                  <div><span>预计 Token</span><strong>{billingAccess.quote.estimatedTotalTokens.toLocaleString()}</strong></div>
+                  <div><span>预计费用</span><strong>{billingAccess.adminMode ? "¥0.00" : `¥${(billingAccess.quote.estimatedUserChargeFen / 100).toFixed(2)}`}</strong></div>
+                  <div><span>当前余额</span><strong>{billingAccess.adminMode ? "管理员" : `¥${(billingAccess.wallet.balanceFen / 100).toFixed(2)}`}</strong></div>
+                </div>
+                <div className="billing-breakdown">
+                  <span>模型成本预估 <b>¥{(billingAccess.quote.estimatedProviderCostFen / 100).toFixed(2)}</b></span>
+                  <span>平台服务费预估 <b>¥{(billingAccess.quote.estimatedPlatformFeeFen / 100).toFixed(2)}</b></span>
+                  <small>最终按实际 Token 结算；管理员会话不扣余额。</small>
+                </div>
+
+                {!billingAccess.adminMode && billingAccess.wallet.balanceFen < billingAccess.quote.estimatedUserChargeFen && (
+                  <div className="recharge-panel">
+                    <strong>余额不足</strong>
+                    <p>选择充值金额。真实支付渠道尚未接通时，只会创建待支付订单，不会直接增加余额。</p>
+                    <div className="recharge-packages">
+                      {[500, 1000, 3000].map((amountFen) => (
+                        <button key={amountFen} type="button" className="recharge-package" disabled={billingLoading} onClick={() => void beginCheckout(amountFen)}>
+                          <span>充值 ¥{(amountFen / 100).toFixed(0)}</span>
+                          <small>{billingAccess.paymentConfigured ? "创建支付订单" : "查看支付接入状态"}</small>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="admin-unlock-panel">
+                  <span>管理员密钥</span>
+                  <div>
+                    <input type="password" value={adminPassword} onChange={(event) => setAdminPassword(event.target.value)} placeholder="仅管理员本人输入" />
+                    <button type="button" className="secondary-button" disabled={billingLoading} onClick={() => void unlockAdminAccess()}>解锁</button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {checkoutMessage && <p className="message-warning billing-message">{checkoutMessage}</p>}
+            {billingError && <p className="message-error billing-error">{billingError}</p>}
+
+            <div className="modal-actions">
+              <button type="button" className="secondary-button" onClick={() => setPaywallOpen(false)}>取消</button>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={
+                  billingLoading
+                  || !billingAccess
+                  || (!billingAccess.adminMode && billingAccess.wallet.balanceFen < billingAccess.quote.estimatedUserChargeFen)
+                }
+                onClick={confirmPaidAiRun}
+              >
+                {billingAccess?.adminMode ? "管理员免费使用" : "余额支付并开始"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       <section className="preview-settings panel-card">
         <label>题库名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <label>科目<input value={subject} onChange={(event) => setSubject(event.target.value)} /></label>

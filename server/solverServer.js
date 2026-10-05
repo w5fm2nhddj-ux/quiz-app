@@ -8,11 +8,15 @@ import { createDeepSeekEnvironmentLoader } from "./envConfig.js";
 import {
   authorizeAiRequest,
   createAdminSession,
+  createPendingPaymentOrder,
+  createUserSession,
   estimateAiQuote,
   getAiWallet,
   getAIBillingState,
-  rechargeAiWallet,
+  releaseAiReservation,
   settleAiUsage,
+  validateAdminSession,
+  validateUserSession,
 } from "./aiBilling.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -117,7 +121,7 @@ const server = createServer(async (request, response) => {
     response.writeHead(safeOrigin ? 204 : 403, {
       ...(safeOrigin ? { "Access-Control-Allow-Origin": safeOrigin } : {}),
       "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-AI-Session, X-AI-User-Session, X-User-Id",
     });
     response.end();
     return;
@@ -144,17 +148,22 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && request.url === "/api/ai/session") {
+    sendJson(response, 200, createUserSession(), origin);
+    return;
+  }
+
   if (request.method === "POST" && request.url === "/api/ai/admin-unlock") {
     try {
       const body = await readJson(request);
       const result = createAdminSession(body.password);
       if (!result.ok) {
-        sendJson(response, 401, result, origin);
+        sendJson(response, result.code === "ADMIN_PASSWORD_NOT_CONFIGURED" ? 503 : 401, result, origin);
         return;
       }
       sendJson(response, 200, result, origin);
       return;
-    } catch (error) {
+    } catch {
       sendJson(response, 400, { ok: false, code: "INVALID_REQUEST", error: "管理员解锁请求无效" }, origin);
       return;
     }
@@ -168,35 +177,77 @@ const server = createServer(async (request, response) => {
       });
       sendJson(response, 200, quote, origin);
       return;
-    } catch (error) {
+    } catch {
       sendJson(response, 400, { ok: false, code: "INVALID_REQUEST", error: "报价请求无效" }, origin);
       return;
     }
   }
 
-  if (request.method === "POST" && request.url === "/api/ai/wallet/recharge") {
+  if (request.method === "POST" && request.url === "/api/ai/access") {
     try {
       const body = await readJson(request);
-      const walletResult = rechargeAiWallet(body.userId || "demo-user", body.amountFen || 500, "mock");
-      sendJson(response, walletResult.ok ? 200 : 400, walletResult, origin);
+      const userSession = validateUserSession(request.headers["x-ai-user-session"]);
+      const authToken = String(request.headers["x-ai-session"] || request.headers.authorization || "").replace(/^Bearer\s+/i, "");
+      const adminMode = validateAdminSession(authToken);
+      if (!adminMode && !userSession) {
+        sendJson(response, 401, { code: "AI_USER_SESSION_REQUIRED", error: "AI 计费会话已失效，请刷新页面重试。" }, origin);
+        return;
+      }
+      const userId = adminMode ? "admin" : userSession.userId;
+      const wallet = adminMode
+        ? { userId: "admin", balanceFen: 0, updatedAt: new Date().toISOString() }
+        : getAiWallet(userId);
+      sendJson(response, 200, {
+        userId,
+        adminMode,
+        wallet,
+        quote: estimateAiQuote({ questionCount: Math.max(1, Number(body.questionCount) || 1) }),
+        paymentConfigured: Boolean(process.env.AI_PAYMENT_PROVIDER),
+      }, origin);
       return;
-    } catch (error) {
-      sendJson(response, 400, { ok: false, code: "INVALID_REQUEST", error: "充值请求无效" }, origin);
+    } catch {
+      sendJson(response, 400, { ok: false, code: "INVALID_REQUEST", error: "AI 权限检查请求无效" }, origin);
       return;
     }
   }
 
-  if (request.method === "GET" && request.url === "/api/ai/wallet") {
-    const userId = new URL(request.url, `http://${request.headers.host || "localhost"}`).searchParams.get("userId") || "demo-user";
-    sendJson(response, 200, { wallet: getAiWallet(userId), pricing: getAIBillingState().pricing }, origin);
-    return;
+  if (request.method === "POST" && request.url === "/api/ai/checkout") {
+    try {
+      const userSession = validateUserSession(request.headers["x-ai-user-session"]);
+      if (!userSession) {
+        sendJson(response, 401, { code: "AI_USER_SESSION_REQUIRED", error: "AI 计费会话已失效，请刷新页面重试。" }, origin);
+        return;
+      }
+      const body = await readJson(request);
+      const order = createPendingPaymentOrder(
+        userSession.userId,
+        body.amountFen || 500,
+        process.env.AI_PAYMENT_PROVIDER || "unconfigured",
+      );
+      sendJson(response, 200, {
+        ok: true,
+        order,
+        paymentConfigured: Boolean(process.env.AI_PAYMENT_PROVIDER),
+        message: process.env.AI_PAYMENT_PROVIDER
+          ? "支付订单已创建；还需要接入支付渠道的下单地址与回调验签后才能自动入账。"
+          : "支付界面已就绪，但尚未配置真实支付渠道；当前不会自动增加余额。",
+      }, origin);
+      return;
+    } catch {
+      sendJson(response, 400, { ok: false, code: "INVALID_REQUEST", error: "支付订单请求无效" }, origin);
+      return;
+    }
   }
 
   if (request.method === "GET" && request.url === "/api/ai/transactions") {
+    const authToken = String(request.headers["x-ai-session"] || request.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    if (!validateAdminSession(authToken)) {
+      sendJson(response, 403, { code: "ADMIN_REQUIRED", error: "仅管理员可查看计费流水" }, origin);
+      return;
+    }
     sendJson(response, 200, getAIBillingState(), origin);
     return;
   }
-
   if (request.method !== "POST" || request.url !== "/api/solve-missing") {
     sendJson(response, 404, { error: "Not found" }, origin);
     return;
@@ -215,6 +266,7 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  let billingRequestId = null;
   try {
     const body = await readJson(request);
     if (!Array.isArray(body.questions)) {
@@ -229,21 +281,25 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    const quote = estimateAiQuote({ questionCount: body.questions.length });
     const authToken = String(request.headers["x-ai-session"] || request.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    const adminMode = validateAdminSession(authToken);
+    const userSession = validateUserSession(request.headers["x-ai-user-session"]);
+    if (!adminMode && !userSession) {
+      sendJson(response, 401, { code: "AI_USER_SESSION_REQUIRED", error: "AI 计费会话已失效，请刷新页面重试。" }, origin);
+      return;
+    }
     const authorized = authorizeAiRequest({
-      userId: body.userId || "demo-user",
+      userId: adminMode ? "admin" : userSession.userId,
       authToken,
       requestId: body.requestId || `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       questionCount: body.questions.length,
-      estimatedChargeFen: body.estimatedChargeFen ?? quote.estimatedUserChargeFen,
-      adminMode: Boolean(body.adminMode),
     });
+    billingRequestId = authorized.requestId;
     if (!authorized.allowed) {
       sendJson(response, 402, {
         code: "INSUFFICIENT_BALANCE",
         error: "AI 余额不足",
-        wallet: getAiWallet(body.userId || "demo-user"),
+        wallet: getAiWallet(userSession.userId),
         requiredFen: authorized.requiredFen,
         balanceFen: authorized.balanceFen,
       }, origin);
@@ -260,16 +316,16 @@ const server = createServer(async (request, response) => {
 
     const usage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     const actualCost = settleAiUsage({
-      userId: body.userId || "demo-user",
+      userId: adminMode ? "admin" : userSession.userId,
       requestId: authorized.requestId,
       questionCount: body.questions.length,
       inputTokens: usage.promptTokens,
       outputTokens: usage.completionTokens,
       totalTokens: usage.totalTokens,
-      adminMode: Boolean(authorized.adminMode),
     });
     sendJson(response, 200, { ...result, billing: actualCost }, origin);
   } catch (error) {
+    if (billingRequestId) releaseAiReservation(billingRequestId);
     const tooLarge = error instanceof Error && error.message === "REQUEST_TOO_LARGE";
     if (!tooLarge) {
       console.error("[solver-internal]", {

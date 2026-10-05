@@ -61,5 +61,8 @@ export async function solveWithDeepSeek(question, options = {}) {
     stream: false,
   }, { signal: options.signal });
 
-  return solverResultSchema.parse(parseJsonContent(completion.choices?.[0]?.message?.content));
+  //return solverResultSchema.parse(parseJsonContent(completion.choices?.[0]?.message?.content));
+  const raw = completion.choices?.[0]?.message?.content;
+  console.log("DeepSeek raw:", raw);
+  return solverResultSchema.parse(parseJsonContent(raw));
 }

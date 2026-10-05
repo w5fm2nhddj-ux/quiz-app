@@ -1,73 +1,77 @@
 import assert from "node:assert/strict";
 import {
+  applyVerifiedPayment,
   authorizeAiRequest,
   calculateActualAiCost,
   createAdminSession,
+  createPendingPaymentOrder,
+  createUserSession,
+  ensureAiWallet,
   estimateAiQuote,
-  getAiWallet,
-  rechargeAiWallet,
+  releaseAiReservation,
   settleAiUsage,
   validateAdminSession,
+  validateUserSession,
 } from "../server/aiBilling.js";
 
-process.env.AI_ADMIN_PASSWORD = "demo-admin";
+delete process.env.AI_ADMIN_PASSWORD;
+const missingAdmin = createAdminSession("anything");
+assert.equal(missingAdmin.ok, false);
+assert.equal(missingAdmin.code, "ADMIN_PASSWORD_NOT_CONFIGURED");
 
+process.env.AI_ADMIN_PASSWORD = "demo-admin";
+assert.equal(createAdminSession("wrong").ok, false);
 const adminSession = createAdminSession("demo-admin");
-assert.equal(adminSession.ok, true, "管理员密码应成功解锁 AI");
-assert.equal(validateAdminSession(adminSession.token), true, "管理员 session 必须有效");
+assert.equal(adminSession.ok, true);
+assert.equal(validateAdminSession(adminSession.token), true);
+
+const userSession = createUserSession();
+assert.equal(validateUserSession(userSession.token)?.userId, userSession.userId);
+assert.equal(ensureAiWallet(userSession.userId).balanceFen, 0);
 
 const quote = estimateAiQuote({ questionCount: 4 });
-assert.ok(quote.estimatedUserChargeFen > 0, "报价应包含预估费用");
-assert.equal(quote.estimatedInputTokens > 0, true, "报价必须提供输入 token 估计");
-assert.equal(quote.estimatedOutputTokens > 0, true, "报价必须提供输出 token 估计");
+assert.ok(quote.estimatedUserChargeFen > 0);
+assert.ok(quote.estimatedPlatformFeeFen >= 0);
 
-const walletBefore = { ...getAiWallet("wallet-user") };
-const rechargeResult = rechargeAiWallet("wallet-user", 1000, "mock");
-assert.equal(rechargeResult.ok, true, "Mock 充值应成功增加余额");
-assert.equal(getAiWallet("wallet-user").balanceFen, walletBefore.balanceFen + 1000, "充值后余额必须增加");
+const pending = createPendingPaymentOrder(userSession.userId, 1000, "unconfigured");
+assert.equal(pending.status, "pending");
+assert.equal(ensureAiWallet(userSession.userId).balanceFen, 0);
 
-const authorization = authorizeAiRequest({
-  userId: "wallet-user",
+const verified = applyVerifiedPayment({ userId: userSession.userId, amountFen: 1000, provider: "test", providerOrderId: "paid-1" });
+assert.equal(verified.ok, true);
+assert.equal(ensureAiWallet(userSession.userId).balanceFen, 1000);
+
+const authorization = authorizeAiRequest({ userId: userSession.userId, requestId: "req-billing-1", questionCount: 1 });
+assert.equal(authorization.allowed, true);
+assert.equal(authorization.transaction.status, "reserved");
+assert.ok(ensureAiWallet(userSession.userId).balanceFen < 1000);
+
+const settled = settleAiUsage({
+  userId: userSession.userId,
   requestId: "req-billing-1",
   questionCount: 1,
-  estimatedChargeFen: 80,
-});
-assert.equal(authorization.allowed, true, "余额足够时应授权 AI 请求");
-assert.equal(authorization.transaction.chargedFen, 80, "授权时应记录预计收费");
-
-const actual = settleAiUsage({
-  userId: "wallet-user",
-  requestId: "req-billing-1",
   inputTokens: 1000,
   outputTokens: 500,
   totalTokens: 1500,
-  chargedFen: 80,
 });
-assert.equal(actual.chargedFen, 80, "实际结算应使用最终费用");
-assert.equal(getAiWallet("wallet-user").balanceFen < 1000, true, "实际扣费后余额应减少");
+assert.equal(settled.status, "settled");
 
-const adminAuth = authorizeAiRequest({
-  userId: "admin",
-  requestId: "req-admin-1",
-  questionCount: 1,
-  authToken: adminSession.token,
-  adminMode: true,
-});
-assert.equal(adminAuth.adminMode, true, "管理员 session 应绕过用户余额");
-assert.equal(adminAuth.transaction.chargedFen, 0, "管理员调用应不扣用户余额");
+applyVerifiedPayment({ userId: userSession.userId, amountFen: 500, provider: "test", providerOrderId: "paid-2" });
+const releaseAuth = authorizeAiRequest({ userId: userSession.userId, requestId: "req-release-1", questionCount: 1 });
+const afterReserve = ensureAiWallet(userSession.userId).balanceFen;
+assert.equal(releaseAiReservation(releaseAuth.requestId), true);
+assert.ok(ensureAiWallet(userSession.userId).balanceFen > afterReserve);
 
-const insufficient = authorizeAiRequest({
-  userId: "tiny-user",
-  requestId: "req-insufficient-1",
-  questionCount: 1,
-  estimatedChargeFen: 999999,
-});
-assert.equal(insufficient.allowed, false, "余额不足时必须拒绝请求");
-assert.equal(insufficient.code, "INSUFFICIENT_BALANCE", "拒绝码必须为 INSUFFICIENT_BALANCE");
+const adminAuth = authorizeAiRequest({ userId: "admin", requestId: "req-admin-1", questionCount: 1, authToken: adminSession.token });
+assert.equal(adminAuth.adminMode, true);
+assert.equal(adminAuth.transaction.chargedFen, 0);
+
+const bypassAttempt = authorizeAiRequest({ userId: "empty-wallet", requestId: "req-bypass-1", questionCount: 1, adminMode: true });
+assert.equal(bypassAttempt.allowed, false);
 
 const cost = calculateActualAiCost(1000, 500);
-assert.ok(cost.providerCostFen >= 0, "实际成本必须可计算");
-assert.ok(cost.platformFeeFen >= 0, "平台服务费必须可计算");
-assert.ok(cost.chargedFen >= cost.providerCostFen, "实际收费必须覆盖成本");
+assert.ok(cost.providerCostFen >= 0);
+assert.ok(cost.chargedFen >= cost.providerCostFen);
+assert.equal(calculateActualAiCost(0, 0).chargedFen, 0);
 
-console.log("ai billing tests passed: admin unlock, quote, mock payment, actual settlement and insufficient balance verified.");
+console.log("ai billing tests passed");

@@ -1,4 +1,5 @@
 import type { ImportedQuestion } from "@/importers";
+import { ensureAiUserSession, getAiSessionToken } from "@/lib/aiBillingClient";
 
 export type SolverFailureCode =
   | "SERVICE_UNAVAILABLE"
@@ -13,6 +14,7 @@ export type SolverFailureCode =
   | "MODEL_PERMISSION_DENIED"
   | "MODEL_NOT_FOUND_OR_DENIED"
   | "MODEL_REQUEST_FAILED"
+  | "PAYMENT_REQUIRED"
   | "INVALID_RESPONSE";
 
 export type SolverDiagnostic = {
@@ -76,6 +78,8 @@ type ErrorPayload = {
   error?: string;
   retryable?: boolean;
   diagnostic?: SolverDiagnostic;
+  balanceFen?: number;
+  requiredFen?: number;
 };
 
 const solverApiUrl = "http://127.0.0.1:8787/api/solve-missing";
@@ -93,7 +97,7 @@ export class SolverClientError extends Error {
   }
 }
 
-const DEFAULT_AI_COMPLETION_DISABLED = true;
+const DEFAULT_AI_COMPLETION_DISABLED = false;
 let aiCompletionEnabled = !DEFAULT_AI_COMPLETION_DISABLED;
 
 export function isAiCompletionEnabled() {
@@ -115,6 +119,18 @@ export function hasMissingAnswer(question: ImportedQuestion) {
 
 function mapServerError(payload: ErrorPayload, fallbackStatus?: number) {
   switch (payload.code) {
+    case "INSUFFICIENT_BALANCE":
+      return new SolverClientError(
+        "PAYMENT_REQUIRED",
+        "AI 余额不足，当前请求需要先完成付费或使用管理员密钥解锁。",
+        `当前余额 ¥${((payload.balanceFen ?? 0) / 100).toFixed(2)}，预计至少需要 ¥${((payload.requiredFen ?? 0) / 100).toFixed(2)}。`,
+      );
+    case "AI_USER_SESSION_REQUIRED":
+      return new SolverClientError(
+        "SERVICE_UNAVAILABLE",
+        "AI 计费会话已失效。",
+        "刷新页面后重新打开 AI 解题即可。",
+      );
     case "DEEPSEEK_API_KEY_MISSING":
       return new SolverClientError(
         "API_KEY_MISSING",
@@ -290,20 +306,18 @@ async function requestBatch(
   const timeout = setTimeout(() => controller.abort(new Error("MODEL_TIMEOUT")), 2 * 60_000);
 
   try {
-    const storedSession = typeof window !== "undefined" ? localStorage.getItem("ai-session") : null;
-    const userId = typeof window !== "undefined" ? localStorage.getItem("ai-user-id") ?? "demo-user" : "demo-user";
+    const storedSession = getAiSessionToken();
+    const userSession = await ensureAiUserSession(fetchImpl);
     const response = await fetchImpl(solverApiUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "X-AI-User-Session": userSession.token,
         ...(storedSession ? { Authorization: `Bearer ${storedSession}` } : {}),
-        "x-user-id": userId,
       },
       body: JSON.stringify({
         questions,
-        userId,
         requestId: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        estimatedChargeFen: Math.max(30, questions.length * 30),
       }),
       signal: controller.signal,
     });

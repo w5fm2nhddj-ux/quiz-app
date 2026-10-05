@@ -269,3 +269,28 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+.ai-paywall-card { width: min(560px, 100%); }
+.billing-loading { margin: 8px 0 20px; color: var(--muted); }
+.billing-summary-grid { margin-bottom: 14px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.billing-summary-grid > div { padding: 14px; border: 1px solid #e4e0ec; border-radius: 13px; display: grid; gap: 5px; background: #faf9fd; }
+.billing-summary-grid span { color: var(--muted); font-size: 11px; }
+.billing-summary-grid strong { color: var(--purple-dark); font-size: 18px; }
+.billing-breakdown { padding: 14px; border-radius: 13px; display: grid; gap: 7px; background: #f6f3ff; color: #5d596c; font-size: 12px; }
+.billing-breakdown span { display: flex; justify-content: space-between; gap: 14px; }
+.billing-breakdown small { margin-top: 3px; color: #8b8699; line-height: 1.55; }
+.recharge-panel { margin-top: 14px; padding: 15px; border: 1px solid #ead79a; border-radius: 13px; background: #fffaf0; }
+.recharge-panel > p { margin: 5px 0 12px; color: #756c57; font-size: 12px; line-height: 1.6; }
+.recharge-packages { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.recharge-package { padding: 11px 8px; border: 1px solid #dfd9c6; border-radius: 10px; display: grid; gap: 3px; color: #6d6552; background: #fff; cursor: pointer; }
+.recharge-package:disabled { cursor: progress; opacity: .7; }
+.recharge-package small { color: #a19a89; font-size: 9px; }
+.admin-unlock-panel { margin-top: 14px; display: grid; gap: 7px; }
+.admin-unlock-panel > span { color: #5d596c; font-size: 12px; font-weight: 700; }
+.admin-unlock-panel > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.billing-error, .billing-message { margin: 14px 0 0 !important; }
+@media (max-width: 620px) {
+  .billing-summary-grid { grid-template-columns: 1fr; }
+  .recharge-packages { grid-template-columns: 1fr; }
+  .admin-unlock-panel > div { grid-template-columns: 1fr; }
+}

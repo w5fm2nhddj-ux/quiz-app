@@ -93,7 +93,7 @@ export class SolverClientError extends Error {
   }
 }
 
-const DEFAULT_AI_COMPLETION_DISABLED = true;
+const DEFAULT_AI_COMPLETION_DISABLED = false;
 let aiCompletionEnabled = !DEFAULT_AI_COMPLETION_DISABLED;
 
 export function isAiCompletionEnabled() {

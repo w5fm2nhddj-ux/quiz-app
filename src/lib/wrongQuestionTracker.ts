@@ -41,6 +41,16 @@ export function getWrongQuestions(bankId: string): WrongQuestionRecord[] {
     .sort((a, b) => b.lastAttemptedAt.localeCompare(a.lastAttemptedAt));
 }
 
+export function buildWrongSessionQuestionIds(
+  bankQuestions: Pick<Question, "id">[],
+  wrongQuestionRecords: Pick<WrongQuestionRecord, "questionId">[],
+): string[] {
+  const wrongIds = new Set(wrongQuestionRecords.map((record) => record.questionId));
+  return bankQuestions
+    .filter((question) => wrongIds.has(question.id))
+    .map((question) => question.id);
+}
+
 export function recordWrongQuestion(
   bankId: string,
   question: Pick<Question, "id" | "question" | "type" | "answer" | "source">,

@@ -7,6 +7,7 @@ import {
   questionHasAnswer,
 } from "@/lib/questionAnswerCompletion";
 import {
+  buildWrongSessionQuestionIds,
   getWrongQuestions,
   recordWrongQuestion,
   removeWrongQuestion,
@@ -38,12 +39,29 @@ export function QuizPage() {
   const bank = useMemo(() => questionBankRepository.getById(bankId), [bankId, bankVersion]);
   const mode = new URLSearchParams(location.search).get("mode");
   const wrongQuestions = useMemo(() => getWrongQuestions(bankId), [bankId, bankVersion, location.search]);
+  const [wrongSessionQuestionIds, setWrongSessionQuestionIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (!bank || mode !== "wrong") {
+      setWrongSessionQuestionIds([]);
+      return;
+    }
+
+    const nextSessionQuestionIds = buildWrongSessionQuestionIds(bank.questions, wrongQuestions);
+    setWrongSessionQuestionIds(nextSessionQuestionIds);
+    setCurrentIndex(0);
+    setSelected([]);
+    setSubmitted(false);
+    setScore(0);
+    setComplete(false);
+  }, [bank?.id, bankId, mode, location.search]);
+
   const drillQuestions = useMemo(() => {
     if (!bank) return [];
     if (mode !== "wrong") return bank.questions;
-    const wrongIds = new Set(wrongQuestions.map((question) => question.questionId));
-    return bank.questions.filter((question) => wrongIds.has(question.id));
-  }, [bank, mode, wrongQuestions]);
+    return wrongSessionQuestionIds
+      .map((questionId) => bank.questions.find((question) => question.id === questionId))
+      .filter((question): question is Question => Boolean(question));
+  }, [bank, mode, wrongSessionQuestionIds]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selected, setSelected] = useState<string[]>([]);
   const [submitted, setSubmitted] = useState(false);
@@ -53,7 +71,8 @@ export function QuizPage() {
   const [aiMessage, setAiMessage] = useState("");
   const autoAttempted = useRef(new Set<string>());
   const aiRunning = useRef(false);
-  const activeQuestion = drillQuestions[currentIndex];
+  const effectiveIndex = drillQuestions.length === 0 ? 0 : Math.min(currentIndex, drillQuestions.length - 1);
+  const activeQuestion = drillQuestions[effectiveIndex];
 
   const completeCurrentAnswer = useCallback(async (questionId: string) => {
     if (!isAiCompletionEnabled()) {
@@ -133,12 +152,22 @@ export function QuizPage() {
 
   // 前面的空状态已经返回，这里固定为有效题库，方便回调函数正确推断类型。
   const currentBank = bank;
-  const question = drillQuestions[currentIndex];
+  const question = drillQuestions[effectiveIndex];
+  if (!question) {
+    return (
+      <main className="page-shell centered-state">
+        <h1>{currentBank.name}</h1>
+        <p>当前题目不存在或已失效，请返回题库重新开始练习。</p>
+        <Link className="primary-button" to={`/banks/${bankId}/practice`}>返回练习</Link>
+      </main>
+    );
+  }
+
   const supported = ["single", "multiple", "boolean"].includes(question.type);
   const hasAnswer = questionHasAnswer(question);
   const gradable = supported && hasAnswer;
   const correct = submitted && gradable && sameAnswers(selected, question.answer);
-  const progress = ((currentIndex + (submitted ? 1 : 0)) / drillQuestions.length) * 100;
+  const progress = drillQuestions.length === 0 ? 0 : ((effectiveIndex + (submitted ? 1 : 0)) / drillQuestions.length) * 100;
 
   function selectOption(optionId: string) {
     if (submitted) return;
@@ -152,7 +181,7 @@ export function QuizPage() {
   }
 
   function submitAnswer() {
-    if (selected.length === 0 || submitted) return;
+    if (!question || selected.length === 0 || submitted) return;
     const isCorrect = sameAnswers(selected, question.answer);
     if (isCorrect) {
       removeWrongQuestion(bankId, question.id);
@@ -165,19 +194,27 @@ export function QuizPage() {
   }
 
   function nextQuestion() {
-    if (currentIndex === drillQuestions.length - 1) {
+    if (!drillQuestions.length) {
       setComplete(true);
       return;
     }
-    setCurrentIndex((value) => value + 1);
+    if (effectiveIndex >= drillQuestions.length - 1) {
+      setComplete(true);
+      return;
+    }
+    setCurrentIndex((value) => Math.min(value + 1, drillQuestions.length - 1));
     setSelected([]);
     setSubmitted(false);
   }
 
   function skipUnsupported() {
-    if (currentIndex === drillQuestions.length - 1) setComplete(true);
+    if (!drillQuestions.length) {
+      setComplete(true);
+      return;
+    }
+    if (effectiveIndex >= drillQuestions.length - 1) setComplete(true);
     else {
-      setCurrentIndex((value) => value + 1);
+      setCurrentIndex((value) => Math.min(value + 1, drillQuestions.length - 1));
       setSelected([]);
       setSubmitted(false);
     }
@@ -197,7 +234,7 @@ export function QuizPage() {
         <span className="eyebrow">练习完成</span>
         <h1>完成了 {currentBank.name}</h1>
         <p>本次答对 <strong>{score}</strong> / {drillQuestions.length} 题</p>
-        <div className="score-bar"><span style={{ width: `${(score / drillQuestions.length) * 100}%` }} /></div>
+        <div className="score-bar"><span style={{ width: `${(score / Math.max(drillQuestions.length, 1)) * 100}%` }} /></div>
         <div className="complete-actions">
           <button className="primary-button" onClick={() => {
             setCurrentIndex(0);
@@ -220,7 +257,7 @@ export function QuizPage() {
       <div className="progress-block">
         <div className="progress-labels">
           <span>练习进度</span>
-          <span><strong>{currentIndex + 1}</strong> / {drillQuestions.length}</span>
+          <span><strong>{effectiveIndex + 1}</strong> / {drillQuestions.length}</span>
         </div>
         <div className="progress-track" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
           <span style={{ width: `${progress}%` }} />
@@ -230,7 +267,7 @@ export function QuizPage() {
       <article className="question-card">
         <div className="question-meta">
           <div>
-            <span className="question-number">第 {currentIndex + 1} 题</span>
+            <span className="question-number">第 {effectiveIndex + 1} 题</span>
             <span className="type-tag">{typeLabels[question.type]}</span>
           </div>
           <span className="difficulty-tag">难度：{difficultyLabel(question)}</span>
@@ -315,7 +352,7 @@ export function QuizPage() {
             </button>
           ) : gradable ? (
             submitted ? (
-              <button className="primary-button" onClick={nextQuestion}>{currentIndex === drillQuestions.length - 1 ? "查看结果" : "下一题"} →</button>
+              <button className="primary-button" onClick={nextQuestion}>{effectiveIndex === drillQuestions.length - 1 ? "查看结果" : "下一题"} →</button>
             ) : (
               <button className="primary-button" onClick={submitAnswer} disabled={selected.length === 0}>提交答案</button>
             )

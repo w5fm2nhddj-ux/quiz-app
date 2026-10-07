@@ -18,10 +18,12 @@
     "test:deepseek": "node tests/deepseekClient.test.js",
     "test:proxy": "node tests/proxyConfig.test.js",
     "test:env": "node tests/envConfig.test.js",
+    "test:cache": "node tests/questionAnswerCache.test.js",
     "diagnose:env": "node scripts/check-env.js",
     "test:billing": "node tests/aiBilling.test.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
     "dotenv": "^18.0.4",
     "mammoth": "1.13.0",
     "openai": "^7.25.0",
@@ -29,7 +31,7 @@
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-router-dom": "7.18.4",
-    "xlsx": "0.18.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^4.6.5"
   },
   "devDependencies": {

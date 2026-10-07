@@ -5,6 +5,8 @@ let projectKey = "mock-project-key";
 let parentKey = "mock-parent-key";
 let projectAdminPassword = "mock-project-admin";
 let parentAdminPassword = "mock-parent-admin";
+let projectSupabaseUrl = "https://project.example.invalid";
+let projectSupabaseServiceRoleKey = "project-service-role-placeholder";
 const env = {};
 const loader = createDeepSeekEnvironmentLoader("D:\\workspace\\quiz-app", {
   env,
@@ -15,7 +17,16 @@ const loader = createDeepSeekEnvironmentLoader("D:\\workspace\\quiz-app", {
     if (value) processEnv.DEEPSEEK_API_KEY = value;
     const adminPassword = isProjectFile ? projectAdminPassword : parentAdminPassword;
     if (adminPassword) processEnv.AI_ADMIN_PASSWORD = adminPassword;
-    return { parsed: { DEEPSEEK_API_KEY: value, AI_ADMIN_PASSWORD: adminPassword } };
+    const supabaseUrl = isProjectFile ? projectSupabaseUrl : "";
+    const supabaseServiceRoleKey = isProjectFile ? projectSupabaseServiceRoleKey : "";
+    if (supabaseUrl) processEnv.SUPABASE_URL = supabaseUrl;
+    if (supabaseServiceRoleKey) processEnv.SUPABASE_SERVICE_ROLE_KEY = supabaseServiceRoleKey;
+    return { parsed: {
+      DEEPSEEK_API_KEY: value,
+      AI_ADMIN_PASSWORD: adminPassword,
+      SUPABASE_URL: supabaseUrl,
+      SUPABASE_SERVICE_ROLE_KEY: supabaseServiceRoleKey,
+    } };
   },
 });
 
@@ -26,6 +37,9 @@ assert.equal(status.source, "quiz-app/.env", "项目根目录 .env 必须优先"
 assert.equal(status.adminPasswordConfigured, true);
 assert.equal(status.adminPasswordSource, "quiz-app/.env");
 assert.equal(env.AI_ADMIN_PASSWORD, projectAdminPassword);
+assert.equal(status.questionCacheConfigured, true);
+assert.equal(env.SUPABASE_URL, projectSupabaseUrl);
+assert.equal(env.SUPABASE_SERVICE_ROLE_KEY, projectSupabaseServiceRoleKey);
 
 projectKey = "updated-key";
 projectAdminPassword = "updated-admin-password";

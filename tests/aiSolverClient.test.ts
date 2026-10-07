@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  cacheOriginalAnswers,
   hasMissingAnswer,
   isAiCompletionEnabled,
   setAiCompletionEnabled,
@@ -38,9 +39,18 @@ function jsonResponse(value: unknown, status = 200) {
   });
 }
 
+function isUserSessionRequest(input: RequestInfo | URL) {
+  return String(input).endsWith("/api/ai/session");
+}
+
+function mockUserSession() {
+  return jsonResponse({ token: "test-user-token", userId: "test-user", expiresAt: "2099-01-01T00:00:00.000Z" });
+}
+
 assert.equal(hasMissingAnswer(question("blank-string", "   ", "source")), true);
 assert.equal(hasMissingAnswer(question("blank-array", ["", "   "], "source")), true);
 assert.equal(hasMissingAnswer(question("false", false, "source")), false);
+setAiCompletionEnabled(false);
 assert.equal(isAiCompletionEnabled(), false, "当前离线版必须关闭 AI 自动补全功能");
 
 const offlineResult = await solveMissingAnswers([question("missing", null, "missing")], {
@@ -60,7 +70,11 @@ await assert.rejects(
 
 await assert.rejects(
   () => solveMissingAnswers([question("missing", null, "missing")], {
-    fetchImpl: async () => jsonResponse({ ok: false, code: "DEEPSEEK_API_KEY_MISSING" }, 503),
+    fetchImpl: async (input) => String(input).endsWith("/health")
+      ? jsonResponse({ ok: true })
+      : isUserSessionRequest(input)
+        ? mockUserSession()
+        : jsonResponse({ code: "DEEPSEEK_API_KEY_MISSING" }, 503),
   }),
   (error) => error instanceof SolverClientError && error.code === "API_KEY_MISSING",
   "API Key 缺失必须与连接失败区分",
@@ -77,7 +91,11 @@ const healthFailures = [
 for (const failure of healthFailures) {
   await assert.rejects(
     () => solveMissingAnswers([question("missing", null, "missing")], {
-      fetchImpl: async () => jsonResponse({ ok: false, code: failure.serverCode }, 503),
+      fetchImpl: async (input) => String(input).endsWith("/health")
+        ? jsonResponse({ ok: true })
+        : isUserSessionRequest(input)
+          ? mockUserSession()
+          : jsonResponse({ code: failure.serverCode }, 503),
     }),
     (error) => error instanceof SolverClientError
       && error.code === failure.clientCode
@@ -87,14 +105,27 @@ for (const failure of healthFailures) {
 }
 
 const sourceQuestion = question("source", "A", "source");
+const manualQuestion = question("manual", "B", "manual");
+let seededOriginalCount = 0;
+await cacheOriginalAnswers([sourceQuestion, manualQuestion], async (input, init) => {
+  if (isUserSessionRequest(input)) return mockUserSession();
+  const body = JSON.parse(String(init?.body)) as { questions: ImportedQuestion[]; sourceAnswers: ImportedQuestion[] };
+  assert.deepEqual(body.questions, [], "original-answer seeding must not submit work to the AI solver");
+  seededOriginalCount += body.sourceAnswers.length;
+  return jsonResponse({ questions: [], errors: [], stats: {} });
+});
+assert.equal(seededOriginalCount, 2, "confirmed original and manual answers should be sent to the server-only cloud cache endpoint");
 const missingQuestions = [question("m1", null, "missing"), question("m2", null, "missing"), question("m3", null, "missing")];
 const requests: string[][] = [];
+const sourceSeedCounts: number[] = [];
 const progressUpdates: SolverProgress[] = [];
 const mockFetch: typeof fetch = async (input, init) => {
   const url = String(input);
-  if (url.endsWith("/health/upstream")) return jsonResponse({ ok: true });
-  const body = JSON.parse(String(init?.body)) as { questions: ImportedQuestion[] };
+  if (url.endsWith("/health")) return jsonResponse({ ok: true });
+  if (isUserSessionRequest(input)) return mockUserSession();
+  const body = JSON.parse(String(init?.body)) as { questions: ImportedQuestion[]; sourceAnswers?: ImportedQuestion[] };
   requests.push(body.questions.map((item) => item.id));
+  sourceSeedCounts.push(body.sourceAnswers?.length ?? 0);
   const solved = body.questions.map((item) => ({
     ...item,
     answer: "B",
@@ -114,6 +145,7 @@ const trial = await solveMissingAnswers([sourceQuestion, ...missingQuestions], {
 });
 
 assert.deepEqual(requests, [["m1"], ["m2"]], "试跑只提交限定数量且按批次发送");
+assert.deepEqual(sourceSeedCounts, [1, 0], "原题答案只在首个请求中提交用于云端种子缓存");
 assert.equal(trial.questions[0].answer, "A", "原题答案不得覆盖");
 assert.equal(trial.questions[1].answer, "B");
 assert.equal(trial.questions[2].answer, "B");
@@ -127,7 +159,8 @@ await assert.rejects(
   () => solveMissingAnswers(missingQuestions, {
     batchSize: 1,
     fetchImpl: async (input, init) => {
-      if (String(input).endsWith("/health/upstream")) return jsonResponse({ ok: true });
+      if (String(input).endsWith("/health")) return jsonResponse({ ok: true });
+      if (isUserSessionRequest(input)) return mockUserSession();
       postCount += 1;
       if (postCount === 2) throw new TypeError("connection interrupted");
       const body = JSON.parse(String(init?.body)) as { questions: ImportedQuestion[] };

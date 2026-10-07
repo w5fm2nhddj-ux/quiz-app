@@ -11,3 +11,4 @@ console.log(`DEEPSEEK_API_KEY exists: ${status.keyExists}`);
 console.log(`DEEPSEEK_API_KEY length: ${status.keyLength}`);
 console.log(`cwd: ${process.cwd()}`);
 
+

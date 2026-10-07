@@ -10,7 +10,12 @@ export function createDeepSeekEnvironmentLoader(projectRoot, options = {}) {
     { label: "quiz-app/.env", path: resolve(projectRoot, ".env") },
     { label: "../.env", path: resolve(dirname(projectRoot), ".env") },
   ];
-  const managedKeys = ["DEEPSEEK_API_KEY", "AI_ADMIN_PASSWORD"];
+  const managedKeys = [
+    "DEEPSEEK_API_KEY",
+    "AI_ADMIN_PASSWORD",
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+  ];
   const inheritedValues = Object.fromEntries(
     managedKeys.map((key) => [key, String(targetEnv[key] ?? "").trim()]),
   );
@@ -36,6 +41,8 @@ export function createDeepSeekEnvironmentLoader(projectRoot, options = {}) {
         loaded: exists && !result.error,
         hasKey: Boolean(values.DEEPSEEK_API_KEY),
         hasAdminPassword: Boolean(values.AI_ADMIN_PASSWORD),
+        hasSupabaseUrl: Boolean(values.SUPABASE_URL),
+        hasSupabaseServiceRoleKey: Boolean(values.SUPABASE_SERVICE_ROLE_KEY),
       });
       for (const key of managedKeys) {
         if (!selectedValues[key] && values[key]) {
@@ -61,6 +68,8 @@ export function createDeepSeekEnvironmentLoader(projectRoot, options = {}) {
 
     const activeKey = String(targetEnv.DEEPSEEK_API_KEY ?? "").trim();
     const activeAdminPassword = String(targetEnv.AI_ADMIN_PASSWORD ?? "").trim();
+    const activeSupabaseUrl = String(targetEnv.SUPABASE_URL ?? "").trim();
+    const activeSupabaseServiceRoleKey = String(targetEnv.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
     return {
       loaded: attempts.some((attempt) => attempt.loaded),
       source: selectedSources.DEEPSEEK_API_KEY,
@@ -68,6 +77,8 @@ export function createDeepSeekEnvironmentLoader(projectRoot, options = {}) {
       keyLength: activeKey.length,
       adminPasswordConfigured: Boolean(activeAdminPassword),
       adminPasswordSource: selectedSources.AI_ADMIN_PASSWORD,
+      questionCacheConfigured: Boolean(activeSupabaseUrl && activeSupabaseServiceRoleKey),
+      questionCacheSource: selectedSources.SUPABASE_URL || selectedSources.SUPABASE_SERVICE_ROLE_KEY,
       attempts,
     };
   };

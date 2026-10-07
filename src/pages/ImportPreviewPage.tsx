@@ -9,6 +9,7 @@ import {
 } from "@/importers";
 import { importPreviewStore } from "@/importers/previewStore";
 import {
+  cacheOriginalAnswers,
   hasMissingAnswer,
   solveMissingAnswers,
   SolverClientError,
@@ -67,6 +68,29 @@ export function summarizeQuestionErrors(errors: SolverQuestionError[]): AiErrorS
   if (errors.length === 0) return null;
   const codes = new Set(errors.map((error) => error.code));
   const diagnostic = errors.find((error) => error.diagnostic)?.diagnostic ?? undefined;
+  if (codes.has("DEEPSEEK_API_KEY_MISSING")) {
+    return {
+      title: "云端缓存未命中的题目暂时无法调用 AI。",
+      action: "请在服务端配置 DEEPSEEK_API_KEY；已命中的云端答案仍可直接使用。",
+      code: "API_KEY_MISSING",
+      blocking: true,
+    };
+  }
+  if (codes.has("INSUFFICIENT_BALANCE")) {
+    return {
+      title: "云端缓存未命中的题目需要 AI 余额。",
+      action: "缓存命中的答案已返回；充值或解锁管理员权限后可重试仍缺答案的题目。",
+      code: "PAYMENT_REQUIRED",
+    };
+  }
+  if (codes.has("QUESTION_CACHE_UNAVAILABLE")) {
+    return {
+      title: "云端题库暂时不可用，本次未调用 AI。",
+      action: "请检查 Supabase 配置、数据库表和网络后重试；为避免意外产生 Token 费用，缓存状态不明时会暂停解题。",
+      code: "QUESTION_CACHE_UNAVAILABLE",
+      blocking: true,
+    };
+  }
   if (codes.has("QUOTA_EXHAUSTED")) {
     return {
       title: "DeepSeek API 额度、余额或消费上限不足。",
@@ -194,7 +218,7 @@ function mergeAiResult(current: ImportedQuestion[], incoming: ImportedQuestion[]
       knowledgePoints: solved.knowledgePoints,
       optionExplanations: solved.optionExplanations,
       relatedQuestions: solved.relatedQuestions,
-      answerSource: "ai" as const,
+      answerSource: solved.answerSource ?? "ai",
       confidence: solved.confidence,
       needsReview: solved.needsReview,
     };
@@ -316,7 +340,36 @@ export function ImportPreviewPage() {
       setQuestionErrors(solved.errors);
       setAiError(summarizeQuestionErrors(solved.errors));
       setAiStatus(solved.errors.length > 0 ? "partial" : "done");
+      const balanceBlockedCount = solved.errors.filter((item) => item.code === "INSUFFICIENT_BALANCE").length;
+      if (balanceBlockedCount > 0) {
+        setPendingAiMode(mode);
+        setPaywallOpen(true);
+        setBillingLoading(true);
+        try {
+          setBillingAccess(await fetchAiAccess(balanceBlockedCount));
+        } catch {
+          // 缓存命中结果已保留；计费面板稍后可重新打开。
+        } finally {
+          setBillingLoading(false);
+        }
+        setBillingError("云端缓存命中的答案已返回；剩余未命中题目需要 AI 余额。请充值或解锁管理员权限后重试。");
+      }
     } catch (error) {
+      if (error instanceof SolverClientError && error.code === "PAYMENT_REQUIRED") {
+        const missing = result?.questions.filter(hasMissingAnswer).length ?? 1;
+        const questionCount = mode === "trial" ? Math.min(AI_TRIAL_SIZE, missing) : missing;
+        setPendingAiMode(mode);
+        setPaywallOpen(true);
+        setBillingLoading(true);
+        try {
+          setBillingAccess(await fetchAiAccess(Math.max(1, questionCount)));
+        } catch {
+          // 保留原始余额不足提示，避免二次查询失败覆盖主要错误。
+        } finally {
+          setBillingLoading(false);
+        }
+        setBillingError("缓存未命中的题目需要 AI 余额。请先充值或解锁管理员权限，再重新开始。");
+      }
       setAiError(error instanceof SolverClientError
         ? {
             title: error.message,
@@ -400,11 +453,6 @@ export function ImportPreviewPage() {
 
   function confirmPaidAiRun() {
     if (!pendingAiMode || !billingAccess) return;
-    const canUse = billingAccess.adminMode || billingAccess.wallet.balanceFen >= billingAccess.quote.estimatedUserChargeFen;
-    if (!canUse) {
-      setBillingError("余额不足。请先完成充值，或输入管理员密钥解锁。");
-      return;
-    }
     const mode = pendingAiMode;
     setPaywallOpen(false);
     setBillingError("");
@@ -468,6 +516,9 @@ export function ImportPreviewPage() {
       return;
     }
     const now = new Date().toISOString();
+    void cacheOriginalAnswers(result.questions).catch(() => {
+      // 云端种子缓存失败不应阻止用户导入本地题库。
+    });
     questionBankRepository.save({
       id: createId("bank"),
       name: name.trim() || "导入题库",
@@ -603,7 +654,7 @@ export function ImportPreviewPage() {
               <>
                 <div className="billing-summary-grid">
                   <div><span>预计 Token</span><strong>{billingAccess.quote.estimatedTotalTokens.toLocaleString()}</strong></div>
-                  <div><span>预计费用</span><strong>{billingAccess.adminMode ? "¥0.00" : `¥${(billingAccess.quote.estimatedUserChargeFen / 100).toFixed(2)}`}</strong></div>
+                  <div><span>未命中预计费用</span><strong>{billingAccess.adminMode ? "¥0.00" : `¥${(billingAccess.quote.estimatedUserChargeFen / 100).toFixed(2)}`}</strong></div>
                   <div><span>当前余额</span><strong>{billingAccess.adminMode ? "管理员" : `¥${(billingAccess.wallet.balanceFen / 100).toFixed(2)}`}</strong></div>
                 </div>
                 <div className="billing-breakdown">
@@ -615,7 +666,7 @@ export function ImportPreviewPage() {
                 {!billingAccess.adminMode && billingAccess.wallet.balanceFen < billingAccess.quote.estimatedUserChargeFen && (
                   <div className="recharge-panel">
                     <strong>余额不足</strong>
-                    <p>选择充值金额。真实支付渠道尚未接通时，只会创建待支付订单，不会直接增加余额。</p>
+                    <p>云端缓存命中免费；只有未命中、需要调用 AI 的题目才计费。真实支付渠道尚未接通时，只会创建待支付订单，不会直接增加余额。</p>
                     <div className="recharge-packages">
                       {[500, 1000, 3000].map((amountFen) => (
                         <button key={amountFen} type="button" className="recharge-package" disabled={billingLoading} onClick={() => void beginCheckout(amountFen)}>
@@ -648,11 +699,10 @@ export function ImportPreviewPage() {
                 disabled={
                   billingLoading
                   || !billingAccess
-                  || (!billingAccess.adminMode && billingAccess.wallet.balanceFen < billingAccess.quote.estimatedUserChargeFen)
                 }
                 onClick={confirmPaidAiRun}
               >
-                {billingAccess?.adminMode ? "管理员免费使用" : "余额支付并开始"}
+                {billingAccess?.adminMode ? "管理员模式：查缓存并开始" : "查云端缓存并开始"}
               </button>
             </div>
           </section>

@@ -5,6 +5,7 @@ import { solveMissingQuestions } from "../agents/solveMissingQuestions.js";
 import { configureProxyFromEnv } from "./proxyConfig.js";
 import { classifyDeepSeekHealthResponse } from "./deepSeekHealth.js";
 import { createDeepSeekEnvironmentLoader } from "./envConfig.js";
+import { createQuestionAnswerCacheRepository, solveQuestionsWithCloudCache } from "./questionAnswerCache.js";
 import {
   authorizeAiRequest,
   createAdminSession,
@@ -22,6 +23,7 @@ import {
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const refreshDeepSeekEnvironment = createDeepSeekEnvironmentLoader(projectRoot);
 let environmentStatus = refreshDeepSeekEnvironment();
+const questionAnswerCache = createQuestionAnswerCacheRepository();
 const proxyStatus = configureProxyFromEnv(process.env, setGlobalProxyFromEnv);
 
 const host = "127.0.0.1";
@@ -133,6 +135,7 @@ const server = createServer(async (request, response) => {
       ok: true,
       apiKeyConfigured: Boolean(process.env.DEEPSEEK_API_KEY),
       adminPasswordConfigured: Boolean(process.env.AI_ADMIN_PASSWORD),
+      questionCacheConfigured: questionAnswerCache.isConfigured(),
       provider: "deepseek",
       model: "deepseek-flash",
       environment: environmentStatus,
@@ -259,15 +262,6 @@ const server = createServer(async (request, response) => {
     sendJson(response, 403, { error: "Origin not allowed" });
     return;
   }
-  environmentStatus = refreshDeepSeekEnvironment();
-  if (!process.env.DEEPSEEK_API_KEY) {
-    sendJson(response, 503, {
-      code: "DEEPSEEK_API_KEY_MISSING",
-      error: "服务器没有配置 DEEPSEEK_API_KEY",
-    }, origin);
-    return;
-  }
-
   let billingRequestId = null;
   try {
     const body = await readJson(request);
@@ -282,6 +276,10 @@ const server = createServer(async (request, response) => {
       }, origin);
       return;
     }
+    if (body.sourceAnswers != null && (!Array.isArray(body.sourceAnswers) || body.sourceAnswers.length > 20)) {
+      sendJson(response, 400, { code: "INVALID_SOURCE_ANSWERS", error: "原始答案缓存条数无效" }, origin);
+      return;
+    }
 
     const authToken = String(request.headers["x-ai-session"] || request.headers.authorization || "").replace(/^Bearer\s+/i, "");
     const adminMode = validateAdminSession(authToken);
@@ -290,44 +288,106 @@ const server = createServer(async (request, response) => {
       sendJson(response, 401, { code: "AI_USER_SESSION_REQUIRED", error: "AI 计费会话已失效，请刷新页面重试。" }, origin);
       return;
     }
-    const authorized = authorizeAiRequest({
-      userId: adminMode ? "admin" : userSession.userId,
-      authToken,
-      requestId: body.requestId || `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      questionCount: body.questions.length,
-    });
-    billingRequestId = authorized.requestId;
-    if (!authorized.allowed) {
-      sendJson(response, 402, {
-        code: "INSUFFICIENT_BALANCE",
-        error: "AI 余额不足",
-        wallet: getAiWallet(userSession.userId),
-        requiredFen: authorized.requiredFen,
-        balanceFen: authorized.balanceFen,
-      }, origin);
-      return;
+    if (questionAnswerCache.isConfigured()) {
+      for (const sourceQuestion of body.sourceAnswers ?? []) {
+        if (!["source", "manual"].includes(sourceQuestion?.answerSource)) continue;
+        try {
+          await questionAnswerCache.saveQuestion(sourceQuestion, sourceQuestion.answerSource);
+        } catch {
+          // 缓存写入失败不应阻断当前题目解答。
+        }
+      }
     }
+    let billing = null;
+    const result = await solveQuestionsWithCloudCache(body.questions, {
+      repository: questionAnswerCache,
+      onCacheEvent(event, hash) {
+        console.log(`[CACHE ${event}] ${hash}`);
+      },
+      async solveMisses(missQuestions) {
+        environmentStatus = refreshDeepSeekEnvironment();
+        if (!process.env.DEEPSEEK_API_KEY) {
+          billing = { status: "api_key_missing", chargedFen: 0 };
+          return {
+            questions: missQuestions,
+            errors: missQuestions.map((question) => ({
+              id: question.id,
+              code: "DEEPSEEK_API_KEY_MISSING",
+              reason: "服务器没有配置 DEEPSEEK_API_KEY",
+              retryable: false,
+              diagnostic: null,
+            })),
+            halted: null,
+            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            stats: { total: missQuestions.length, attempted: 0, aiFailures: missQuestions.length },
+          };
+        }
 
-    const result = await solveMissingQuestions(body.questions, {
-      batchSize: 10,
-      concurrency: 3,
-      maxRetries: 2,
-      timeoutMs: 30_000,
+        const authorized = authorizeAiRequest({
+          userId: adminMode ? "admin" : userSession.userId,
+          authToken,
+          requestId: body.requestId || `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          questionCount: missQuestions.length,
+        });
+        if (!authorized.allowed) {
+          billing = {
+            status: "insufficient_balance",
+            chargedFen: 0,
+            requiredFen: authorized.requiredFen,
+            balanceFen: authorized.balanceFen,
+          };
+          return {
+            questions: missQuestions,
+            errors: missQuestions.map((question) => ({
+              id: question.id,
+              code: "INSUFFICIENT_BALANCE",
+              reason: "缓存未命中的题目需要 AI 余额",
+              retryable: false,
+              diagnostic: null,
+            })),
+            halted: null,
+            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            stats: { total: missQuestions.length, attempted: 0, aiFailures: missQuestions.length },
+          };
+        }
+        billingRequestId = authorized.requestId;
+
+        const solved = await solveMissingQuestions(missQuestions, {
+          batchSize: 10,
+          concurrency: 3,
+          maxRetries: 2,
+          timeoutMs: 30_000,
+        });
+        const usage = solved.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+        billing = settleAiUsage({
+          userId: adminMode ? "admin" : userSession.userId,
+          requestId: authorized.requestId,
+          questionCount: missQuestions.length,
+          inputTokens: usage.promptTokens,
+          outputTokens: usage.completionTokens,
+          totalTokens: usage.totalTokens,
+        });
+        return solved;
+      },
     });
     for (const error of result.errors) logDiagnostic("question", error);
-
-    const usage = result.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-    const actualCost = settleAiUsage({
-      userId: adminMode ? "admin" : userSession.userId,
-      requestId: authorized.requestId,
-      questionCount: body.questions.length,
-      inputTokens: usage.promptTokens,
-      outputTokens: usage.completionTokens,
-      totalTokens: usage.totalTokens,
-    });
-    sendJson(response, 200, { ...result, billing: actualCost }, origin);
+    sendJson(response, 200, {
+      ...result,
+      billing: billing ?? {
+        status: result.cacheStatus === "unavailable"
+          ? "cache_unavailable"
+          : result.cacheStatus === "disabled" ? "cache_disabled" : "cache_only",
+        chargedFen: 0,
+        providerCostFen: 0,
+        platformFeeFen: 0,
+      },
+    }, origin);
   } catch (error) {
     if (billingRequestId) releaseAiReservation(billingRequestId);
+    if (error?.httpStatus && error?.payload) {
+      sendJson(response, error.httpStatus, error.payload, origin);
+      return;
+    }
     const tooLarge = error instanceof Error && error.message === "REQUEST_TOO_LARGE";
     if (!tooLarge) {
       console.error("[solver-internal]", {

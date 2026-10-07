@@ -83,7 +83,7 @@ type ErrorPayload = {
 };
 
 const solverApiUrl = "http://127.0.0.1:8787/api/solve-missing";
-const solverHealthUrl = "http://127.0.0.1:8787/health/upstream";
+const solverHealthUrl = "http://127.0.0.1:8787/health";
 
 export class SolverClientError extends Error {
   constructor(
@@ -260,6 +260,7 @@ export async function assertSolverReady(fetchImpl: typeof fetch = fetch) {
   }
 
   const health = await readJson<SolverHealth>(response);
+  // 只确认本地 Solver 正常；上游 Key/网络检查由服务端放在缓存未命中之后执行。
   if (response.ok && health.ok) return;
   throw mapServerError(health, response.status);
 }
@@ -278,7 +279,7 @@ function mergeSolvedQuestions(current: ImportedQuestion[], incoming: ImportedQue
       knowledgePoints: solved.knowledgePoints,
       optionExplanations: solved.optionExplanations,
       relatedQuestions: solved.relatedQuestions,
-      answerSource: "ai" as const,
+      answerSource: solved.answerSource ?? "ai",
       confidence: solved.confidence,
       needsReview: solved.needsReview,
     };
@@ -299,6 +300,7 @@ async function requestBatch(
   questions: ImportedQuestion[],
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
+  sourceAnswers: ImportedQuestion[] = [],
 ) {
   const controller = new AbortController();
   const abortFromCaller = () => controller.abort(signal?.reason);
@@ -317,6 +319,7 @@ async function requestBatch(
       },
       body: JSON.stringify({
         questions,
+        sourceAnswers,
         requestId: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       }),
       signal: controller.signal,
@@ -342,6 +345,31 @@ async function requestBatch(
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+export async function cacheOriginalAnswers(questions: ImportedQuestion[], fetchImpl: typeof fetch = fetch) {
+  const sourceAnswers = questions
+    .filter((question) => !hasMissingAnswer(question) && ["source", "manual"].includes(question.answerSource))
+    .slice(0, 100);
+  for (let start = 0; start < sourceAnswers.length; start += 20) {
+    const storedSession = getAiSessionToken();
+    const userSession = await ensureAiUserSession(fetchImpl);
+    const response = await fetchImpl(solverApiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-AI-User-Session": userSession.token,
+        ...(storedSession ? { Authorization: `Bearer ${storedSession}` } : {}),
+      },
+      body: JSON.stringify({
+        questions: [],
+        sourceAnswers: sourceAnswers.slice(start, start + 20),
+        requestId: `seed_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      }),
+    });
+    const payload = await readJson<SolverResponse & ErrorPayload>(response);
+    if (!response.ok) throw mapServerError(payload, response.status);
   }
 }
 
@@ -377,11 +405,21 @@ export async function solveMissingAnswers(
   const errors: SolverQuestionError[] = [];
   let processed = 0;
   let succeeded = 0;
+  const sourceAnswers = questions
+    .filter((question) => !hasMissingAnswer(question) && ["source", "manual"].includes(question.answerSource))
+    .slice(0, 20);
+  let sourceAnswersSent = false;
 
   for (let start = 0; start < candidates.length; start += batchSize) {
     if (options.signal?.aborted) throw options.signal.reason;
     const batch = candidates.slice(start, start + batchSize);
-    const payload = await requestBatch(batch, fetchImpl, options.signal);
+    const payload = await requestBatch(
+      batch,
+      fetchImpl,
+      options.signal,
+      sourceAnswersSent ? [] : sourceAnswers,
+    );
+    sourceAnswersSent = true;
     merged = mergeSolvedQuestions(merged, payload.questions);
     errors.push(...payload.errors);
     processed += payload.stats.attempted ?? batch.length;
